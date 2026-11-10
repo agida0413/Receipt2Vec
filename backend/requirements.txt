@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+python-dotenv
+httpx
+sentence-transformers>=2.2.0
+opensearch-py
+google-generativeai
