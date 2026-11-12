@@ -1,0 +1,39 @@
+# 환경변수 파일
+**/.env
+**/.env.*
+!**/.env.example
+
+# 파이썬 가상환경/캐시
+.venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+
+# 프론트엔드 빌드/의존성
+frontend/node_modules/
+frontend/dist/
+
+# IDE/OS 설정
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 로그/임시 파일
+*.log
+*.tmp
+*.temp
+
+# OpenSearch 로컬 데이터/스냅샷(로컬 실행 산출물)
+opensearch-data/
+opensearch_data/
+opensearch/data/
+opensearch/snapshots/
+data/opensearch/
+snapshots/opensearch/
+**/*opensearch*snapshot*
+
+.claude
+.vscode
