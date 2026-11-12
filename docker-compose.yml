@@ -1,8 +1,9 @@
 # =============================================================================
 # rag-base Docker 실행 구성
-#   docker compose up -d --build                       # OpenSearch + backend
+#   docker compose up -d --build                       # OpenSearch + backend + ocr-backend
+#   docker compose up -d --build ocr-backend           # OCR 서버만
 #   docker compose --profile dashboards up -d --build  # + OpenSearch Dashboards(5601)
-# 설정값은 backend/.env 를 그대로 사용하고, 컨테이너 간 접속 정보만 아래에서 덮어씀
+# 설정값은 rag_backend/.env 를 그대로 사용하고, 컨테이너 간 접속 정보만 아래에서 덮어씀
 # =============================================================================
 name: rag-base
 
@@ -51,12 +52,12 @@ services:
 
   backend:
     build:
-      context: ./backend
+      context: ./rag_backend
     image: rag-base-backend:latest
     container_name: ragbase-backend
-    # backend/.env.example 을 backend/.env 로 복사해서 사용 (없으면 실행 오류)
+    # rag_backend/.env.example 을 rag_backend/.env 로 복사해서 사용 (없으면 실행 오류)
     env_file:
-      - ./backend/.env
+      - ./rag_backend/.env
     environment:
       # 컨테이너 네트워크 내부 주소로 덮어씀 (.env의 localhost 값 무시)
       OPENSEARCH_HOST: opensearch
@@ -71,12 +72,37 @@ services:
       # 임베딩/리랭킹 모델 캐시 (재시작 시 재다운로드 방지)
       - hf-cache:/models/huggingface
       # 적재 데이터(CSV) — 이미지 재빌드 없이 교체 가능
-      - ./backend/app/test:/app/app/test:ro
+      - ./rag_backend/app/test:/app/app/test:ro
     depends_on:
       opensearch:
         condition: service_healthy
     restart: unless-stopped
 
+  ocr-backend:
+    build:
+      context: ./ocr_backend
+    image: receipt2vec-ocr-backend:latest
+    container_name: receipt2vec-ocr-backend
+    # ocr_backend/.env 는 선택 (없으면 config.py 기본값 사용)
+    env_file:
+      - path: ./ocr_backend/.env
+        required: false
+    environment:
+      PORT: "3002"
+    ports:
+      - "${OCR_PUBLISH_PORT:-3002}:3002"
+    volumes:
+      # PaddleOCR 모델 캐시 (재시작 시 재다운로드 방지)
+      - paddle-cache:/models/paddlex
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3002/')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+
 volumes:
   opensearch-data:
   hf-cache:
+  paddle-cache:

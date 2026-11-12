@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+python-dotenv
+pillow
+numpy
+# PaddleOCR 3.x (PP-OCRv5). paddlepaddle(CPU) 는 Dockerfile 에서 먼저 설치
+paddleocr>=3.1,<4
+# 규칙 파서 실패 시 LLM 폴백 (Gemini)
+google-genai>=1.20,<4
+# zoneinfo 타임존 데이터 (slim 이미지에는 OS 타임존 DB가 없음)
+tzdata
