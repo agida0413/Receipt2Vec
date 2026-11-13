@@ -49,6 +49,23 @@ app = FastAPI(
 
 app.include_router(api_router, prefix="/api")
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+@app.on_event("startup")
+async def prepare_transaction_index():
+    """거래 인덱스 준비 (없으면 생성, 이전 버전이 있으면 파생 필드·임베딩을 다시 만들어 이관 후 별칭 전환)"""
+    from fastapi.concurrency import run_in_threadpool
+    from app.services.transactions.store import transaction_store
+    try:
+        await run_in_threadpool(transaction_store.ensure_index)
+        logger.info(f"거래 인덱스 준비 완료: {transaction_store.alias} → {transaction_store.physical_index}")
+        # 첫 추론은 torch 초기화로 수 초 걸림 → 기동 시 한 번 돌려 첫 질문 지연 제거
+        await run_in_threadpool(lambda: (transaction_store._embed("준비", query=True),
+                                         transaction_store.reranker and transaction_store.reranker.score("준비", ["준비"])))
+    except Exception as e:  # noqa: BLE001  (OpenSearch 가 늦게 떠도 서버는 기동, 첫 요청 때 재시도)
+        logger.warning(f"거래 인덱스 준비 실패 (첫 요청 시 재시도): {e}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

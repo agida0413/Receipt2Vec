@@ -61,6 +61,38 @@ class RerankConfig:
 
 
 @dataclass
+class TransactionConfig:
+    """영수증·결제내역 거래 저장소 설정"""
+    index_name: str           # 별칭(alias). 실제 인덱스는 '{alias}-v{버전}' 이고 매핑이 바뀌면 버전을 올려 재색인
+    legacy_index: str         # 이전 버전(별칭 도입 전) 인덱스. 있으면 최초 기동 시 새 인덱스로 이관
+    semantic_min_score: float  # 의미 검색 채택 최소 리랭크 점수 (cross-encoder 0~1)
+    embed_on_save: bool       # 저장 시 임베딩 생성 (false 면 의미 검색 없이 키워드만)
+
+
+def _choice(key: str, default: str, choices: tuple) -> str:
+    value = get_env(key, default).strip().lower() or default
+    if value not in choices:
+        raise ValueError(f"{key} 는 {choices} 중 하나여야 합니다: {value!r}")
+    return value
+
+
+@dataclass
+class ChatConfig:
+    """
+    가계부 챗봇 설정
+    planner : 질문 → 조회 조건(QueryPlan).  auto = Gemini 사용 가능하면 llm, 아니면 rule
+    answerer: 조회 결과 → 답변 문장.        auto = Gemini 사용 가능하면 llm, 아니면 template
+    """
+    planner: str
+    answerer: str
+    model_name: str
+    timeout_sec: int
+    history_turns: int
+    max_result_rows: int
+    vocabulary_size: int      # 질문 해석 LLM 에 넘길 사용자 가맹점 수 (검색어를 실제 가맹점명으로 맞추는 용도)
+
+
+@dataclass
 class LLMConfig:
     """LLM 설정"""
     provider: str
@@ -92,6 +124,15 @@ class Settings:
             search_pipeline_name=get_env("SEARCH_PIPELINE_NAME","hybrid-search-pipeline")
         )
 
+        # 거래(영수증·결제내역) 저장소 — 도메인 검색 인덱스(INDEX_NAME)와 별개
+        self.transactions = TransactionConfig(
+            index_name=get_env("TRANSACTION_INDEX", "receipt-transactions"),
+            legacy_index=get_env("TRANSACTION_LEGACY_INDEX", "receipt-transactions-v1"),
+            semantic_min_score=get_env_float("TRANSACTION_SEMANTIC_MIN_SCORE", 0.02),
+            embed_on_save=get_env_bool("TRANSACTION_EMBED_ON_SAVE", True),
+        )
+        self.timezone = get_env("TIMEZONE", "Asia/Seoul")
+
         # 임베딩 설정
         self.embedding = EmbeddingConfig(
             model_name=get_env("EMBEDDING_MODEL", "intfloat/multilingual-e5-base"),
@@ -118,6 +159,17 @@ class Settings:
             api_key=get_env("GEMINI_API_KEY", ""),
             max_tokens=get_env_int("LLM_MAX_TOKENS", 1024),
             temperature=get_env_float("LLM_TEMPERATURE", 0.3)
+        )
+
+        # 가계부 챗봇 (Gemini 키는 LLM 설정과 공유)
+        self.chat = ChatConfig(
+            planner=_choice("CHAT_PLANNER", "auto", ("auto", "llm", "rule")),
+            answerer=_choice("CHAT_ANSWERER", "auto", ("auto", "llm", "template")),
+            model_name=get_env("CHAT_MODEL", "") or self.llm.model_name,
+            timeout_sec=get_env_int("CHAT_LLM_TIMEOUT_SEC", 30),
+            history_turns=get_env_int("CHAT_HISTORY_TURNS", 6),
+            max_result_rows=get_env_int("CHAT_MAX_RESULT_ROWS", 20),
+            vocabulary_size=get_env_int("CHAT_VOCABULARY_SIZE", 50),
         )
 
     def print_config(self):

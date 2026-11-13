@@ -129,5 +129,17 @@ class Settings:
             max_input_chars=get_env_int("LLM_MAX_INPUT_CHARS", 6000),
         )
 
+        # 확인된 거래 저장소 = rag_backend (OpenSearch·챗봇은 rag_backend 소유)
+        self.store = StoreConfig(
+            url=get_env("RAG_BACKEND_URL", "http://localhost:3001").rstrip("/"),
+            timeout_sec=get_env_int("RAG_BACKEND_TIMEOUT_SEC", 30),
+        )
+
+
+@dataclass
+class StoreConfig:
+    url: str
+    timeout_sec: int   # 저장 시 rag_backend 가 임베딩을 만들므로 여유 있게
+
 
 settings = Settings()

@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.domain.transaction import ReviewReason, SourceType, Transaction
 from app.models import DocumentType, ExtractionInfo, PaymentAppData, ReceiptData
 from app.services import normalizer, quality
-from app.services.llm.gemini_extractor import Extractor, gemini_extractor
+from app.services.llm.gemini_extractor import Extractor, QuotaExceededError, gemini_extractor
 from app.services.llm.verifier import verify
 from app.services.parser import (
     detect_document_type_scored, normalize_rows, parse_payment_app, parse_receipt,
@@ -112,11 +112,20 @@ async def extract_transactions(
         info.llmSkippedReason = "LLM_MODE=off 또는 GEMINI_API_KEY 미설정"
         return final
 
+    cooldown = getattr(llm, "cooldown_message", None)
+    if cooldown:
+        info.llmSkippedReason = cooldown
+        return final
+
     # ------------------------------------------------------------------ LLM 폴백
     info.llmAttempted = True
     info.llmModel = llm.model_name
     try:
         extraction = await llm.extract(raw_text, hint=_DOC_TO_SOURCE[detected])
+    except QuotaExceededError as e:
+        logger.warning(f"LLM 할당량 초과 — 규칙 파서 결과 사용: {e}")
+        info.llmError = str(e)
+        return final
     except Exception as e:
         logger.exception("LLM 추출 실패 — 규칙 파서 결과 사용")
         info.llmError = f"{type(e).__name__}: {e}"

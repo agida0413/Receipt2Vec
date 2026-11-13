@@ -154,3 +154,13 @@ class ConfirmResponse(BaseModel):
     valid: bool = Field(..., description="모든 거래가 저장 가능한 상태인지")
     transactions: List[Transaction]
     errors: List[ConfirmError] = []
+
+
+class SaveTransactionsRequest(BaseModel):
+    userId: str = Field(..., min_length=1)
+    transactions: List[Transaction] = Field(..., description="사용자가 확인/수정한 거래")
+
+
+class SaveTransactionsResponse(BaseModel):
+    saved: List[str] = Field(..., description="저장된 transactionId")
+    duplicates: List[str] = Field([], description="이미 저장된 거래라 건너뛴 transactionId")
