@@ -30,7 +30,7 @@ logger.info(f"PaddleOCR 로딩 완료 (사용가능: {ocr_engine.is_ready})")
 
 app = FastAPI(
     title="Receipt2Vec OCR API",
-    description="PaddleOCR 기반 영수증 / 결제앱 결제내역 인식 서버",
+    description="PaddleOCR 기반 영수증 / 결제앱 결제내역 인식 + 사용자별 거래 챗봇(SSE)",
     version="1.0.0",
 )
 

@@ -207,6 +207,72 @@ POST /api/search/index   (recreate 옵션)
 | --- | --- | --- |
 | POST | `/api/health/` | 상태/타임스탬프/버전 반환 |
 
+### 거래(영수증·결제내역) 저장소 API
+
+ocr_backend 가 추출·사용자 확인을 마친 거래(Transaction, schemaVersion 1)를 저장하고, 챗봇이 구조화된 조건으로 조회한다.
+(`services/transactions/`, 도메인 검색 인덱스와 별개, 매핑 `dynamic: strict`)
+
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| POST | `/api/transactions` | `{userId, transactions[]}` 저장 (보강·임베딩 후). dedupKey 로 중복 건너뜀 → `{saved, duplicates}` |
+| GET | `/api/transactions?userId=&limit=` | 최근 거래 목록 |
+| DELETE | `/api/transactions/{transactionId}?userId=` | 삭제 (본인 거래만) |
+| POST | `/api/transactions/query` | 구조화 조회 (아래) → `{total, userTotal, matchType, aggregates, groups, transactions}` |
+| GET | `/api/transactions/vocabulary?userId=` | 사용자의 실제 가맹점·업종·간편결제 목록 (질문 해석 LLM 에 제공) |
+| POST | `/api/transactions/reenrich` | 업종 사전·보강 규칙 변경 후 기존 거래 전체 재보강 (관리용) |
+
+**색인 (v2)** — 별칭 `receipt-transactions` → `receipt-transactions-v2`. 매핑을 바꾸면 `store.py` 의 `INDEX_VERSION` 을 올린다.
+기동 시 새 인덱스를 만들고 이전 인덱스(별칭 대상 또는 `TRANSACTION_LEGACY_INDEX`) 문서를 다시 보강해 옮긴 뒤 별칭을 전환한다 (원본 보존).
+
+| 저장 시 파생 필드 (`enrich.py`) | 해결하는 질문 |
+| --- | --- |
+| `merchant.category` / `merchant.brand` (업종·브랜드 사전) | "편의점에서…", "업종별로 얼마" |
+| `merchant.normalizedName` (`(주)`·OCR 잡음 제거) | 가맹점별 집계가 같은 가게로 묶임 |
+| `merchant.name.ngram`, `items.name.ngram`, `merchant.address.ngram` | "하나로" 처럼 형태소로 안 쪼개지는 부분 일치 |
+| `dayOfWeek`, `transactedHour` | "주말에", "밤에", "요일별" |
+| `searchText` (가맹점·업종·주소·품목·결제수단 한국어) | 키워드 검색 보조 |
+| `embedding` (e5, knn_vector) | 단어가 안 맞을 때 의미 검색 후보 |
+
+**조회 조건 (`TransactionQuery`)** — 검색어 그룹은 서로 AND, 그룹 안은 OR
+`merchantTerms`(가맹점·브랜드) · `locationTerms`(지역 → 가맹점명·주소) · `itemTerms`+`categories`(무엇을: 품목 OR 업종) ·
+`keywords`(성격 모를 단어, 단어별 그룹) · `semanticQuery`, 필터 `startDate/endDate(미포함)`, `provider`, `method`, `cardCompany`,
+`status`, `minAmount/maxAmount`, `weekdays`, `hourFrom/hourTo`(자정 넘는 구간 가능), `sortBy`, `groupBy`
+(`MERCHANT|CATEGORY|DAY|MONTH|WEEKDAY|METHOD|PROVIDER`), `limit`
+
+**단계적 검색** (`matchType`)
+1. `EXACT` 모든 그룹 일치 → 2. `RELAXED` 0건이면 그룹 하나 빠져도 허용 →
+3. `SEMANTIC` 그래도 0건이면 벡터 후보 15건 → cross-encoder 재채점 → `TRANSACTION_SEMANTIC_MIN_SCORE`(0.02) 이상 & 1등×0.3 이상만.
+   e5 점수만으로는 관련/무관 차이가 0.01 수준이라 리랭커로 거른다. 품목만 묻는 질문은 품목 있는 거래만 후보.
+
+- `userId` 필터는 항상 강제, 저장 시 본문의 userId 는 무시하고 요청의 userId 로 덮어씀
+- AGGREGATE 는 status 지정이 없으면 APPROVED 만 집계 (취소·환불 제외), 합계·건수는 항상 OpenSearch 집계
+
+### 가계부 챗봇 API (`services/chat/`)
+
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| POST | `/api/chat/stream` | `{userId, message, history}` → SSE (`status` → `plan` → `result` → `token`… → `done`, 그 외 `notice`, `error`) |
+
+```
+질문 → 사용자 어휘 조회(가맹점·업종) → [질문 전처리 LLM] QueryPlan
+     → 코드: 날짜 계산·userId 강제·LLM 플랜 보정 → 거래 조회(단계적) → [답변 LLM] 스트리밍
+```
+- **질문 전처리(증강)**: Gemini 에 인덱스 구조 + 사용자의 실제 가맹점·업종 목록을 함께 주고, 검색어를 필드별
+  (가맹점/지역/품목/업종)로 나누고 동의어·하위 품목으로 확장하게 한다 ("스벅" → 스타벅스, "커피" → 아메리카노·라떼 + 카페)
+- **보정**: 질문에 없는 기간 제거, 빠뜨린 필터(결제수단·금액·요일·시간대)를 규칙으로 보충, 업종 값 정규화
+- **답변**: 숫자는 집계 그대로, `matchType` 이 RELAXED/SEMANTIC 이면 '일부 일치/비슷한 거래' 라고 밝힘
+- Gemini 를 못 쓰면(키 없음·429·402) 규칙 해석 + 템플릿 답변. 설정: `CHAT_PLANNER`, `CHAT_ANSWERER`, `CHAT_MODEL`
+- **품목 단위**: 저장 시 품목마다 분류(`items[].category`: 담배·주류·고기 …)를 붙이고, 품목 질문은 품목 금액·수량으로 집계
+  ('담배에 쓴 돈' = 담배 품목 합계, 편의점 결제 전체가 아님). `groupBy=ITEM` 은 품목별 순위, 결과의 `matchedItems` 는 맞은 품목
+
+**정확도 평가** (`tests/eval/chat_eval.py`) — 평가용 사용자 `eval` 에 '오늘' 기준 상대 날짜로 거래 23건을 넣고,
+질문 101개(기간 합계·품목·가맹점·필터·후속 질문·애매한 질문)의 기대값을 같은 데이터에서 계산해 답변을 채점한다.
+```
+MSYS_NO_PATHCONV=1 docker run --rm --network host -v "<rag_backend>:/app" -w /app \
+    --entrypoint python rag-base-backend:latest tests/eval/chat_eval.py --reset   # 이후엔 --reset 없이, -v 상세
+```
+(`EVAL_RAG_URL` 로 다른 인스턴스 지정 가능 — 예: `CHAT_PLANNER=rule CHAT_ANSWERER=template` 로 띄운 비상 모드)
+
 ---
 
 ## 5. 핵심 서비스 설명

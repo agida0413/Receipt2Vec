@@ -1,7 +1,7 @@
 # ocr_backend
 
 PaddleOCR(3.x, PP-OCRv5 한국어 모델) 로 **종이 영수증**과 **카카오페이 등 결제앱 결제내역 캡처**를 인식해
-구조화된 JSON 으로 돌려주는 FastAPI 서버. (OpenSearch 적재는 아직 하지 않음)
+구조화된 JSON 으로 돌려주는 FastAPI 서버. (거래 저장·검색은 rag_backend 담당)
 
 ## 실행
 
@@ -60,6 +60,16 @@ curl -F "file=@receipt.jpg" -F "user_id=user01" -F "use_llm=true"      http://lo
 - `LLM_MODE`: `off`(미사용) / `fallback`(규칙 파서 실패 시만, 기본) / `always`(항상 LLM 결과 사용)
   - 요청별: `use_llm=false` 로 끄기, `force_llm=true` 로 강제. LLM 실패·거래 0건이면 규칙 결과로 응답
 
+## 거래 저장 (/api/ocr/transactions)
+
+사용자가 확인·수정한 거래를 `confirm` 과 같은 규칙으로 재검증한 뒤 rag_backend(`RAG_BACKEND_URL`)의
+`POST /api/transactions` 로 넘긴다. OpenSearch 인덱스·검색·챗봇은 모두 rag_backend 담당이며,
+이 서버는 OpenSearch 에 직접 접속하지 않는다.
+
+| Method | Path | 설명 |
+|---|---|---|
+| POST | `/api/ocr/transactions` | `{"userId","transactions":[...]}` → `{"saved","duplicates"}` (필수 항목 누락 시 422, rag_backend 미기동 시 503) |
+
 ## 구조
 
 ```
@@ -75,7 +85,8 @@ app/
   services/pipeline.py          # 규칙 → LLM 폴백 → 검증 → 정규화 → 품질 평가
   services/normalizer.py        # 파서 출력 → Transaction (enum 매핑)
   services/quality.py           # needsReview / LLM 폴백 판단
-  services/llm/                 # Gemini 추출기, 출력 스키마, 원문 대조 검증
+  services/llm/                 # Gemini 공용 클라이언트(재시도·쿨다운), 추출기, 원문 대조 검증
+  services/transaction_store.py # 확인된 거래 → rag_backend 저장 API 호출
   services/parser/
     __init__.py                 # 문서 유형 판별
     common.py                   # 금액/날짜/번호 추출

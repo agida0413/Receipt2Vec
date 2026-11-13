@@ -5,44 +5,18 @@ Gemini 기반 거래 정보 추출 (규칙 파서 실패 시에만 호출)
 - 출력: LlmExtraction (JSON 스키마 강제)
 - 결과는 verifier 로 원문 대조 후 사용
 """
-import asyncio
 import logging
-import re
-import time
-from datetime import date, datetime
+from datetime import date
 from typing import Optional, Protocol
-from zoneinfo import ZoneInfo
 
 from app.core.config import LlmConfig, settings
 from app.domain.transaction import SourceType
+from app.services.llm.gemini_client import (  # noqa: F401  (parse_retry_delay 는 테스트/외부 호환용 재노출)
+    QuotaExceededError, QuotaGuard, call_with_retry, get_client, parse_retry_delay, shared_quota_guard,
+)
 from app.services.llm.schema import LlmExtraction
 
 logger = logging.getLogger(__name__)
-
-# 일시적 오류(서버 과부하)는 지수 백오프로 재시도
-RETRYABLE_CODES = {500, 503}
-MAX_ATTEMPTS = 3
-RETRY_BASE_DELAY_SEC = 1.0
-# 429(할당량 초과): 서버가 알려준 대기 시간이 이보다 짧으면(분당 한도) 기다렸다 재시도,
-# 길면(일일 한도 등) 재시도하지 않고 그 시간 동안 LLM 호출을 멈춤(쿨다운)
-MAX_INLINE_RETRY_WAIT_SEC = 10.0
-DEFAULT_COOLDOWN_SEC = 60.0
-
-
-class QuotaExceededError(RuntimeError):
-    """Gemini 할당량 초과 — 쿨다운 동안 LLM 호출 중단"""
-
-
-def parse_retry_delay(message: str) -> Optional[float]:
-    """429 응답의 RetryInfo('retryDelay': '344s') 또는 'retry in 5m44.7s' 에서 대기 초 추출"""
-    m = re.search(r"retryDelay['\"]?\s*:\s*['\"](\d+(?:\.\d+)?)s", message)
-    if m:
-        return float(m.group(1))
-    m = re.search(r"retry in (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s", message)
-    if m:
-        h, mi, s = m.groups()
-        return int(h or 0) * 3600 + int(mi or 0) * 60 + float(s)
-    return None
 
 SYSTEM_INSTRUCTION = """\
 당신은 한국의 종이 영수증 또는 간편결제 앱(카카오페이, 토스페이, 네이버페이 등) 결제내역 화면을
@@ -97,10 +71,10 @@ class Extractor(Protocol):
 
 
 class GeminiExtractor:
-    def __init__(self, config: Optional[LlmConfig] = None):
+    def __init__(self, config: Optional[LlmConfig] = None, guard: Optional[QuotaGuard] = None):
         self._config = config or settings.llm
         self._client = None
-        self._cooldown_until: Optional[float] = None  # 할당량 초과 시 이 시각(epoch)까지 호출 안 함
+        self._guard = guard or QuotaGuard()
 
     @property
     def model_name(self) -> str:
@@ -113,26 +87,11 @@ class GeminiExtractor:
     @property
     def cooldown_message(self) -> Optional[str]:
         """할당량 초과로 호출을 멈춘 상태면 안내 문구, 아니면 None"""
-        if self._cooldown_until is None or time.time() >= self._cooldown_until:
-            return None
-        until = datetime.fromtimestamp(self._cooldown_until, ZoneInfo(settings.timezone))
-        return (f"Gemini 할당량 초과({self.model_name}) — {until:%H:%M:%S} 이후 재개 "
-                f"(무료 등급 일일 한도일 수 있음, https://ai.dev/rate-limit 에서 확인)")
-
-    def _start_cooldown(self, retry_after: Optional[float]) -> None:
-        wait = retry_after if retry_after is not None else DEFAULT_COOLDOWN_SEC
-        self._cooldown_until = time.time() + wait
-        logger.warning(f"Gemini 할당량 초과 — {wait:.0f}초 동안 LLM 호출 중단")
+        return self._guard.message(self.model_name)
 
     def _get_client(self):
         if self._client is None:
-            from google import genai
-            from google.genai import types
-            # system_instruction / response_schema 는 v1beta 에서 지원 (SDK 기본값 v1 은 거부)
-            self._client = genai.Client(
-                api_key=self._config.api_key,
-                http_options=types.HttpOptions(api_version="v1beta"),
-            )
+            self._client = get_client(self._config.api_key)
         return self._client
 
     def _build_config(self):
@@ -151,38 +110,15 @@ class GeminiExtractor:
         prompt = PROMPT_TEMPLATE.format(hint=hint.value, text=text[: self._config.max_input_chars])
         client = self._get_client()
         config = self._build_config()
-
-        response = None
-        for attempt in range(MAX_ATTEMPTS):
-            try:
-                response = await asyncio.wait_for(
-                    client.aio.models.generate_content(
-                        model=self._config.model_name, contents=prompt, config=config,
-                    ),
-                    timeout=self._config.timeout_sec,
-                )
-                break
-            except Exception as e:
-                code = getattr(e, "code", None)
-                if code == 429:
-                    retry_after = parse_retry_delay(str(e))
-                    # 서버가 긴 대기를 요구하면(일일/분당 할당량 소진) 재시도해도 실패 → 쿨다운 후 포기
-                    if retry_after is None or retry_after > MAX_INLINE_RETRY_WAIT_SEC:
-                        self._start_cooldown(retry_after)
-                        raise QuotaExceededError(self.cooldown_message or "Gemini 할당량 초과") from e
-                    delay = retry_after
-                elif code in RETRYABLE_CODES:
-                    delay = RETRY_BASE_DELAY_SEC * (2 ** attempt)
-                else:
-                    raise
-                if attempt == MAX_ATTEMPTS - 1:
-                    raise
-                logger.warning(f"Gemini {code} — {delay:.1f}초 후 재시도 ({attempt + 1}/{MAX_ATTEMPTS - 1})")
-                await asyncio.sleep(delay)
-
+        response = await call_with_retry(
+            lambda: client.aio.models.generate_content(
+                model=self._config.model_name, contents=prompt, config=config,
+            ),
+            guard=self._guard, model_name=self.model_name, timeout=self._config.timeout_sec,
+        )
         if not response or not response.text:
             raise RuntimeError("Gemini 응답이 비어 있습니다.")
         return LlmExtraction.model_validate_json(response.text)
 
 
-gemini_extractor = GeminiExtractor()
+gemini_extractor = GeminiExtractor(guard=shared_quota_guard)

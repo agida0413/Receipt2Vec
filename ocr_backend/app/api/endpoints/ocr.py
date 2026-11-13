@@ -4,8 +4,9 @@ OCR 엔드포인트
 POST /api/ocr/recognize : 이미지 → PaddleOCR → 규칙 파서 →(실패 시) Gemini → 검증 → Transaction[]
 POST /api/ocr/parse     : 텍스트만 넣어서 위 파이프라인 실행 (OCR 미실행, 파서 튜닝용)
 POST /api/ocr/confirm   : 사용자가 확인/수정한 Transaction[] 재검증 → 저장 가능한 형태로 확정
+POST /api/ocr/transactions : confirm 과 같은 검증 후 rag_backend(거래 저장소)에 저장
 
-OCR 백엔드는 저장하지 않는다. confirm 결과를 클라이언트가 RAG 백엔드 저장 API 로 보낸다.
+OpenSearch 에는 직접 쓰지 않는다. 저장·검색·챗봇은 rag_backend 담당.
 """
 import logging
 import time
@@ -17,8 +18,9 @@ from fastapi.concurrency import run_in_threadpool
 from app.core.config import settings
 from app.models import (
     ConfirmError, ConfirmRequest, ConfirmResponse, DocumentType, OcrLineOut, OcrResponse,
-    ParseTextRequest, ParseTextResponse, ReceiptData,
+    ParseTextRequest, ParseTextResponse, ReceiptData, SaveTransactionsRequest, SaveTransactionsResponse,
 )
+from app.services.transaction_store import StoreRequestError, StoreUnavailableError, transaction_store
 from app.services.ocr import ocr_engine
 from app.services.ocr.image_utils import InvalidImageError, load_image
 from app.services.ocr.layout import group_rows
@@ -121,3 +123,27 @@ async def confirm(request: ConfirmRequest):
         if not tx.quality.confirmed
     ]
     return ConfirmResponse(valid=not errors, transactions=confirmed, errors=errors)
+
+
+@router.post("/transactions", response_model=SaveTransactionsResponse)
+async def save_transactions(request: SaveTransactionsRequest):
+    """
+    사용자 확인을 마친 거래 저장: confirm 과 같은 재검증(클라이언트가 /confirm 을 건너뛰어도 안전) 후
+    rag_backend 거래 저장소로 전달. 중복 거래는 저장소가 건너뛰고 duplicates 로 알려준다.
+    """
+    confirmed = confirm_transactions(request.transactions)
+    invalid = [
+        {"transactionId": tx.transactionId, "missingFields": tx.quality.missingFields}
+        for tx in confirmed if not tx.quality.confirmed
+    ]
+    if invalid:
+        raise HTTPException(status_code=422, detail={"message": "필수 항목(가맹점·날짜·금액)이 비었습니다.",
+                                                     "invalid": invalid})
+    try:
+        saved, duplicates = await transaction_store.save(request.userId, confirmed)
+    except StoreUnavailableError:
+        raise HTTPException(status_code=503, detail="거래 저장소(rag_backend)에 연결할 수 없습니다. "
+                                                    "rag_backend 가 시작 중이면 잠시 후 다시 시도해 주세요.")
+    except StoreRequestError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return SaveTransactionsResponse(saved=saved, duplicates=duplicates)

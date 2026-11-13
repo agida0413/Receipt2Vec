@@ -1,7 +1,9 @@
 # =============================================================================
 # rag-base Docker 실행 구성
 #   docker compose up -d --build                       # OpenSearch + backend + ocr-backend
-#   docker compose up -d --build ocr-backend           # OCR 서버만
+#   docker compose up -d --build ocr-backend           # OCR 서버 (backend·opensearch 자동 기동)
+#   (챗봇·거래 저장소는 backend = rag_backend, 3001)
+#   docker compose up -d --build frontend              # 챗봇 화면 http://localhost:3000
 #   docker compose --profile dashboards up -d --build  # + OpenSearch Dashboards(5601)
 # 설정값은 rag_backend/.env 를 그대로 사용하고, 컨테이너 간 접속 정보만 아래에서 덮어씀
 # =============================================================================
@@ -89,17 +91,35 @@ services:
         required: false
     environment:
       PORT: "3002"
+      # 거래 저장/조회는 rag_backend 가 담당 (OpenSearch 에 직접 접속하지 않음)
+      RAG_BACKEND_URL: http://backend:3001
     ports:
       - "${OCR_PUBLISH_PORT:-3002}:3002"
     volumes:
       # PaddleOCR 모델 캐시 (재시작 시 재다운로드 방지)
       - paddle-cache:/models/paddlex
+    depends_on:
+      # backend 는 모델 로딩에 수 분 걸림 → 기다리지 않고 기동, 그 사이 저장/조회는 503
+      backend:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3002/')\" || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 20
       start_period: 120s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: receipt2vec-frontend:latest
+    container_name: receipt2vec-frontend
+    ports:
+      - "${FRONTEND_PUBLISH_PORT:-3000}:80"
+    depends_on:
+      - ocr-backend
+      - backend
     restart: unless-stopped
 
 volumes:
