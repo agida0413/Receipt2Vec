@@ -50,7 +50,12 @@ ADDR_RE = re.compile(r"[가-힣]+(시|도)\s+[가-힣]+(구|군|시)\s+\S*(로|�
 DATE_LABEL_RE = re.compile(r"거래\s*일\s*시|결제\s*일\s*시|판매\s*일|거래\s*일자|승인\s*일\s*시|일\s*시")
 INSTALLMENT_RE = re.compile(r"일시불|(\d{1,2})\s*개월")
 BARCODE_TOKEN_RE = re.compile(r"^\d{8,14}$")
-ITEM_NO_PREFIX_RE = re.compile(r"^(?:\d{1,3}|P\d{0,3}|\*)\s+")
+# 품목에서 빼야 할 주소 줄 (ADDR_RE 는 '서울시' 처럼 시·도 접미사가 있어야 해서 '서울 강남구 …' 를 놓침)
+ADDR_LINE_RE = re.compile(
+    r"^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)\S*\s+[가-힣]+(구|군|시)\b"
+    r"|[가-힣]+(구|군)\s+[가-힣0-9]+(로|길|대로)\s*\d"
+)
+ITEM_NO_PREFIX_RE =re.compile(r"^(?:\d{1,3}|P\d{0,3}|\*)\s+")
 
 
 def _find_key_amount(rows: List[str], keys: List[str]) -> Tuple[Optional[int], Optional[int]]:
@@ -102,6 +107,9 @@ def _store_name(rows: List[str]) -> Optional[str]:
     return None
 
 
+_NO_PRICE_TOKENS = {"-", "–", "—", "―", "－"}
+
+
 def _split_trailing_numbers(text: str) -> Tuple[str, List[int]]:
     """'아메리카노 2 4,500 9,000' → ('아메리카노', [2, 4500, 9000])"""
     tokens = text.split()
@@ -109,6 +117,11 @@ def _split_trailing_numbers(text: str) -> Tuple[str, List[int]]:
     while tokens:
         tok = tokens[-1]
         if BARCODE_TOKEN_RE.match(tok.replace(",", "")):
+            tokens.pop()
+            continue
+        if tok in _NO_PRICE_TOKENS:
+            # 가격 칸의 '-' = 가격 없음 (스타벅스 '일회용컵으로  1  -' 같은 옵션 줄) → 0원 품목으로
+            numbers.insert(0, 0)
             tokens.pop()
             continue
         amounts = c.extract_amounts(tok)
@@ -147,6 +160,8 @@ def _build_item(name: str, numbers: List[int]) -> Optional[ReceiptItem]:
     if qty is None and unit is None:
         qty = 1
         unit = abs(amount)
+    if amount == 0:
+        unit = None  # 가격 없음 ('-') → 단가도 없음
     return ReceiptItem(name=name, quantity=qty, unitPrice=unit, amount=amount)
 
 
@@ -170,6 +185,10 @@ def _items(rows: List[str]) -> List[ReceiptItem]:
             continue
         if c.parse_date(row) or c.find_biz_number(row) or c.find_phone(row):
             continue
+        # 주소 줄 ('서울 강남구 테헤란로 123') 의 끝 번지를 금액으로 읽어 품목이 되는 것 방지
+        if ADDR_RE.search(row) or LABEL_ADDR_RE.search(row) or ADDR_LINE_RE.search(row):
+            pending_name = None
+            continue
         name, numbers = _split_trailing_numbers(row)
         if numbers and not c.has_text(name) and pending_name:
             # 상품명 줄 + 숫자 줄로 나뉜 양식 (대형마트 영수증 등)
@@ -184,6 +203,35 @@ def _items(rows: List[str]) -> List[ReceiptItem]:
         item = _build_item(name, numbers)
         if item:
             items.append(item)
+    return items
+
+
+def _repair_merged_quantity(items: List[ReceiptItem], total: Optional[int], discount: Optional[int]) -> List[ReceiptItem]:
+    """
+    수량과 금액 칸이 가까우면 OCR 이 한 덩어리로 읽는다: '에쎄 1mg  1  4,500' → '14,500'
+    품목 합계가 총액과 안 맞을 때만, 금액 앞 1~2자리를 수량으로 떼어 봐서 합계가 총액과 '정확히' 맞으면 고친다.
+    (맞지 않으면 건드리지 않음 → 우연히 고쳐지는 오탐 방지)
+    """
+    if not items or not total:
+        return items
+    target = total + (discount or 0)
+    current = sum(i.amount for i in items)
+    if current == target or current == total:
+        return items
+    for idx, it in enumerate(items):
+        if it.quantity not in (None, 1) or it.amount <= 0:
+            continue
+        s = str(it.amount)
+        for k in (1, 2):
+            if len(s) <= k + 2 or s[k] == "0":
+                continue
+            qty, amount = int(s[:k]), int(s[k:])
+            if not 1 <= qty <= 20:
+                continue
+            if current - it.amount + amount in (target, total):
+                fixed = ReceiptItem(name=it.name, quantity=qty,
+                                    unitPrice=amount // qty if amount % qty == 0 else None, amount=amount)
+                return items[:idx] + [fixed] + items[idx + 1:]
     return items
 
 
@@ -233,6 +281,8 @@ def parse_receipt(rows: List[str]) -> ReceiptData:
 
     rep = LABEL_REP_RE.search(full_text)
 
+    if not total_inferred:
+        items = _repair_merged_quantity(items, total, discount)
     items_sum = sum(i.amount for i in items) if items else None
     if total_inferred:
         items_match = None  # 추정한 총액과의 비교는 의미 없음

@@ -167,7 +167,8 @@ def _verify_tx(tx: LlmTransaction, ev: TextEvidence) -> List[str]:
 
     kept = []
     for item in tx.items:
-        if not ev.has_number(item.amount):
+        # 0원 = 가격 없음 ('일회용컵으로  -' 같은 옵션 줄). 원문에 '0' 이 없어도 지어낸 숫자가 아니므로 유지
+        if item.amount != 0 and not ev.has_number(item.amount):
             dropped.append(f"items[{item.name}]")
             continue
         if item.unitPrice is not None and not ev.has_number(item.unitPrice):

@@ -172,3 +172,100 @@ def test_real_ocr_quirks():
     assert r.datetime == "2025-03-12T14:23:05"
     assert r.cardNumber == "5310-12**-****-1234"
     assert r.address == "서울특별시 강남구 테헤란로 123 1층"
+
+
+# ---------------------------------------------------------------------------- 품목 인식 회귀 (실제 OCR 결과 기반)
+# 수량 칸과 금액 칸이 가까워 OCR 이 '1 4,500' 을 '14,500' 으로 붙여 읽은 결과 + 주소 줄
+MERGED_QTY_RECEIPT = rows("""
+GS25 선릉역점
+서울 강남구 테헤란로 123
+사업자번호123-45-67890
+2026-11-13 14:25
+에써체인지 1mg 14,500
+바나나우유 1 1,700
+합계 6,200
+신용카드 6,200
+""")
+
+
+def test_merged_quantity_repaired_and_address_not_item():
+    _, r = parse_document(MERGED_QTY_RECEIPT, DocumentType.receipt)
+    names = [i.name for i in r.items]
+    assert not any("테헤란로" in n for n in names)                  # 주소 줄은 품목 아님
+    first = r.items[0]
+    assert (first.quantity, first.amount) == (1, 4500)             # 14,500 → 수량 1 + 4,500
+    assert r.items[1].name == "바나나우유" and r.items[1].amount == 1700
+    assert r.itemsSumMatchesTotal is True
+
+
+def test_merged_quantity_not_repaired_when_sum_does_not_reconcile():
+    data = rows("""
+테스트마트
+2026-11-13 14:25
+라면 14,500
+우유 1 1,700
+합계 30,000
+""")
+    _, r = parse_document(data, DocumentType.receipt)
+    assert r.items[0].amount == 14500                              # 총액과 맞출 수 없으면 그대로 둠
+
+
+# ---------------------------------------------------------------------------- 기울어진 사진의 줄 묶기
+def _tilted_line(text, x, y, w, h, slope):
+    """(x, y) 를 왼쪽 위로 하는 폭 w·높이 h 글자 영역을 slope 만큼 기울인 OcrLine"""
+    from app.services.ocr.layout import OcrLine
+    p0 = (x, y)
+    p1 = (x + w, y + slope * w)
+    p2 = (x + w, y + slope * w + h)
+    p3 = (x, y + h)
+    xs, ys = [p[0] for p in (p0, p1, p2, p3)], [p[1] for p in (p0, p1, p2, p3)]
+    return OcrLine(text=text, score=0.99, box=(int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))), poly=(p0, p1, p2, p3))
+
+
+def test_group_rows_handles_tilted_photo():
+    """4° 기울기(slope 0.07): 오른쪽 금액이 아래로 처져 윗줄·아랫줄과 엇갈리던 사례"""
+    from app.services.ocr.layout import group_rows
+    slope, h, gap = 0.07, 26, 34          # 줄 간격 34px, 금액은 이름보다 380px 오른쪽 → 26px 처짐
+    items = [("말보로 레드", "4,500"), ("삼각김밥 참치마요", "2,600"), ("바나나우유", "1,700"), ("새우깡", "1,500")]
+    lines = []
+    for i, (name, amt) in enumerate(items):
+        y = 100 + i * gap
+        lines.append(_tilted_line(name, 20, y, 220, h, slope))
+        lines.append(_tilted_line(amt, 400, y + slope * 380, 90, h, slope))
+    rows = [r.text for r in group_rows(lines)]
+    assert rows == [f"{n} {a}" for n, a in items]
+
+
+def test_group_rows_straight_photo_unchanged():
+    from app.services.ocr.layout import OcrLine, group_rows
+    lines = [OcrLine("아메리카노", 0.99, (10, 100, 120, 126)), OcrLine("4,500", 0.99, (300, 102, 360, 128)),
+             OcrLine("카페라떼", 0.99, (10, 140, 110, 166)), OcrLine("5,000", 0.99, (300, 141, 360, 167))]
+    assert [r.text for r in group_rows(lines)] == ["아메리카노 4,500", "카페라떼 5,000"]
+
+
+# ---------------------------------------------------------------------------- 가격 없음 '-' 표기
+def test_dash_price_is_no_price_not_minus_one():
+    data = rows("""
+스타벅스 역삼점
+2026-11-13 10:12
+아이스카페아메리카노 1 4,100
+일회용컵으로 1 -
+아이스카페아메리카노 1 4,600
+일회용컵으로
+-
+합계 8,700
+""")
+    _, r = parse_document(data, DocumentType.receipt)
+    got = [(i.name, i.amount) for i in r.items]
+    assert got == [("아이스카페아메리카노", 4100), ("일회용컵으로", 0), ("아이스카페아메리카노", 4600), ("일회용컵으로", 0)]
+    assert r.itemsSumMatchesTotal is True
+
+
+def test_ocr_minus_one_becomes_no_price():
+    """OCR 이 '-' 를 '-1' 로 읽은 경우 → 정규화에서 0원(가격 없음)"""
+    from app.domain.transaction import Item
+    from app.services.normalizer import clean_items
+    items = clean_items([Item(name="일회용컵으로", quantity=1, unitPrice=-1, amount=-1),
+                         Item(name="쿠폰할인", quantity=1, unitPrice=None, amount=-500)])
+    assert (items[0].amount, items[0].unitPrice) == (0, None)
+    assert items[1].amount == -500                                  # 실제 할인은 유지

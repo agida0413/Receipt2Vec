@@ -6,6 +6,8 @@ if str(_backend_root) not in sys.path:
     sys.path.insert(0, str(_backend_root))
 
 import logging
+
+from app.core.logging_setup import RequestLoggingMiddleware, setup_logging
 import os
 from dotenv import load_dotenv
 
@@ -21,11 +23,7 @@ from app.services.opensearch import index_service, embedding_service
 from app.services.llm import llm_service
 from app.services.rerank import reranker
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+setup_logging("rag-backend")
 logger = logging.getLogger(__name__)
 
 # 서버 시작 시 모델 미리 로딩
@@ -49,7 +47,6 @@ app = FastAPI(
 
 app.include_router(api_router, prefix="/api")
 
-logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @app.on_event("startup")
@@ -73,6 +70,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggingMiddleware, service="rag-backend")
 
 @app.get("/")
 async def root():

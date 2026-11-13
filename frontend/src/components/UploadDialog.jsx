@@ -242,7 +242,7 @@ export default function UploadDialog({ userId, onClose, onSaved }) {
                     <div className="item-chips">
                       {r.items.map((it, k) => (
                         <span key={k} className="item-chip">
-                          {it.name}{it.quantity > 1 ? ` ×${it.quantity}` : ''}<b>{won(it.amount)}</b>
+                          {it.name}{it.quantity > 1 ? ` ×${it.quantity}` : ''}<b>{it.amount ? won(it.amount) : '가격 없음'}</b>
                         </span>
                       ))}
                     </div>

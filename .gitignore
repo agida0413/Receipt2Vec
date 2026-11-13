@@ -1,0 +1,4 @@
+# 비밀값 (Slack 웹훅, API 키 등) — 절대 커밋하지 않음
+.env
+**/.env
+!**/.env.example

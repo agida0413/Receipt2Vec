@@ -175,12 +175,19 @@ _ITEM_NAME_NOISE_RE = re.compile(r"\*{2,}\d*|(?<![\d.])\d{8,14}(?![\d.])")
 
 
 def clean_items(items: Iterable[Item]) -> List[Item]:
-    """품목명에 붙은 바코드/마스킹 숫자 제거, 빈 이름 제외"""
+    """
+    품목명에 붙은 바코드/마스킹 숫자 제거, 빈 이름 제외
+    -1 ~ -9원은 실제 할인이 아니라 '가격 없음(-)' 표기를 OCR 이 '-1' 처럼 읽은 것 → 0원(가격 없음)으로
+    """
     result = []
     for i in items:
         name = re.sub(r"\s+", " ", _ITEM_NAME_NOISE_RE.sub(" ", i.name or "")).strip()
-        if name:
-            result.append(i.model_copy(update={"name": name}))
+        if not name:
+            continue
+        update = {"name": name}
+        if i.amount is not None and -10 < i.amount < 0:
+            update.update(amount=0, unitPrice=None)
+        result.append(i.model_copy(update=update))
     return result
 
 

@@ -1,0 +1,165 @@
+# Receipt2Vec 관제 알림 규칙 (1분마다 평가)
+#   critical: 에러 로그, API 5xx, 컨테이너 중지 / warning: healthcheck 이상, 메모리 과다
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: receipt2vec
+    folder: Receipt2Vec
+    interval: 1m
+    rules:
+      # ------------------------------------------------------------------ 에러 로그 (메시지별)
+      - uid: r2v-error-logs
+        title: 에러 로그 발생
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              queryType: instant
+              # 서비스 + 에러 메시지 앞부분별로 묶음 → 어떤 에러인지 Slack 에 바로 보임
+              expr: >-
+                sum by (service, message) (count_over_time({project="rag-base", level=~"ERROR|CRITICAL"}
+                | regexp `\| rid=[^|]*\| [^|]*\| (?P<message>[^=]{1,80}?)(?: [A-Za-z_]+=|$)` [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [ { evaluator: { type: gt, params: [0] } } ]
+        labels: { severity: critical }
+        annotations:
+          __dashboardUid__: receipt2vec-errors
+          __panelId__: '6'
+          summary: '{{ $labels.service }} 에서 에러 {{ $values.B.Value | printf "%.0f" }}건 (최근 5분)'
+          description: '에러 대시보드에서 스택트레이스와 요청 ID(rid)를 확인하세요.'
+
+      # ------------------------------------------------------------------ API 5xx (nginx 기준: 백엔드가 죽어 로그를 못 남긴 경우까지)
+      - uid: r2v-http-5xx
+        title: API 5xx 응답
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              queryType: instant
+              expr: >-
+                sum by (path, status) (count_over_time({project="rag-base", service="frontend"} |= "path=/api/" |~ `status=5\d\d `
+                | regexp `path=(?P<path>\S+) status=(?P<status>5\d\d)` [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [ { evaluator: { type: gt, params: [0] } } ]
+        labels: { severity: critical, service: frontend }
+        annotations:
+          __dashboardUid__: receipt2vec-logs
+          __panelId__: '9'
+          summary: '{{ $labels.path }} 가 {{ $labels.status }} 응답 {{ $values.B.Value | printf "%.0f" }}건 (최근 5분)'
+          description: '502/504 면 백엔드 컨테이너가 죽었거나 재시작 중일 수 있어요. 컨테이너 대시보드를 확인하세요.'
+
+      # ------------------------------------------------------------------ 컨테이너 중지
+      - uid: r2v-container-down
+        title: 컨테이너 중지
+        condition: C
+        for: 1m
+        noDataState: Alerting
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 120, to: 0 }
+            model: { refId: A, instant: true, expr: 'max by (service) (docker_container_up)' }
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [ { evaluator: { type: lt, params: [1] } } ]
+        labels: { severity: critical }
+        annotations:
+          __dashboardUid__: receipt2vec-containers
+          __panelId__: '7'
+          summary: '{{ $labels.service }} 컨테이너가 1분 넘게 멈춰 있어요'
+          description: '복구: docker compose up -d {{ $labels.service }}'
+
+      # ------------------------------------------------------------------ healthcheck 실패
+      - uid: r2v-container-unhealthy
+        title: 헬스체크 실패
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 120, to: 0 }
+            model: { refId: A, instant: true, expr: 'max by (service) (docker_container_health{status="unhealthy"})' }
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [ { evaluator: { type: gt, params: [0] } } ]
+        labels: { severity: warning }
+        annotations:
+          __dashboardUid__: receipt2vec-containers
+          __panelId__: '7'
+          summary: '{{ $labels.service }} healthcheck 가 2분 넘게 unhealthy 예요'
+          description: '컨테이너는 떠 있지만 응답하지 않아요. 로그 대시보드에서 해당 서비스 로그를 확인하세요.'
+
+      # ------------------------------------------------------------------ 메모리 과다 (Docker 전체)
+      - uid: r2v-memory-high
+        title: 메모리 부족 위험
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model: { refId: A, instant: true,
+                     expr: 'sum(docker_container_memory_usage_bytes) / scalar(docker_host_memory_bytes) * 100' }
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [ { evaluator: { type: gt, params: [85] } } ]
+        labels: { severity: warning }
+        annotations:
+          __dashboardUid__: receipt2vec-containers
+          __panelId__: '7'
+          summary: 'Docker 메모리 사용률 {{ $values.B.Value | printf "%.0f" }}% (5분 넘게 85% 초과)'
+          description: '메모리가 부족하면 컨테이너가 강제 종료(137)될 수 있어요. 모니터링 스택을 끄거나 Docker 메모리를 늘리세요.'
