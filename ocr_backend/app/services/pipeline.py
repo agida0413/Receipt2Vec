@@ -103,18 +103,24 @@ async def extract_transactions(
         documentReviewReasons=sorted(rule_doc_reasons, key=lambda r: r.value), extraction=info,
     )
 
+    logger.info(f"규칙 파서 doc={detected.value} confident={confident} tx={len(rule_txs)} "
+                f"triggers={sorted(r.value for r in triggers)} force={force} rows={len(rows)}")
     if not triggers and not force:
+        logger.info("LLM 미사용: 규칙 파서 결과 충분")
         return final
     if not use_llm:
         info.llmSkippedReason = "요청에서 use_llm=false"
+        logger.info(f"LLM 미사용: {info.llmSkippedReason}")
         return final
     if not llm.is_available:
         info.llmSkippedReason = "LLM_MODE=off 또는 GEMINI_API_KEY 미설정"
+        logger.warning(f"LLM 미사용: {info.llmSkippedReason} (트리거 {sorted(r.value for r in triggers)})")
         return final
 
     cooldown = getattr(llm, "cooldown_message", None)
     if cooldown:
         info.llmSkippedReason = cooldown
+        logger.warning(f"LLM 미사용(쿨다운): {cooldown}")
         return final
 
     # ------------------------------------------------------------------ LLM 폴백
@@ -133,6 +139,8 @@ async def extract_transactions(
 
     checked = verify(extraction, raw_text)
     info.llmUnverifiedFields = [f for fields in checked.unverified for f in fields]
+    if info.llmUnverifiedFields:
+        logger.warning(f"LLM 값 원문 불일치(제거됨) fields={info.llmUnverifiedFields}")
     llm_source = normalizer.make_source(
         checked.extraction.documentType,
         provider_text=checked.extraction.screenProvider.value if checked.extraction.screenProvider else None,
@@ -153,10 +161,11 @@ async def extract_transactions(
 
     rule_bad = quality.badness(rule_txs, rule_doc_reasons)
     llm_bad = quality.badness(llm_txs, llm_doc_reasons)
-    logger.info(f"규칙 점수={rule_bad}, LLM 점수={llm_bad} (낮을수록 좋음, force={force})")
+    logger.info(f"추출 비교 rule_badness={rule_bad} llm_badness={llm_bad} force={force} (낮을수록 좋음)")
     adopt = bool(llm_txs) if force else llm_bad < rule_bad
     if force and not llm_txs:
         info.llmError = "LLM 이 거래를 찾지 못해 규칙 파서 결과 사용"
+    logger.info(f"추출 결과 채택={'llm' if adopt else 'rule'} rule_tx={len(rule_txs)} llm_tx={len(llm_txs)}")
     if adopt:
         info.method = "llm"
         info.llmUsed = True

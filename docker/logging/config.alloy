@@ -1,0 +1,121 @@
+// Grafana Alloy: rag-base 프로젝트 컨테이너 로그 → Loki
+//
+// 앱 로그 형식 (rag_backend · ocr_backend · nginx 공통)
+//   2026-11-13 16:20:01.123 | INFO    | rid=a1b2c3d4 | app.services.chat.service | 질문 접수 user=eval q="…"
+// 라벨(인덱스): project, service, container, stream, level(DEBUG/INFO/WARNING/ERROR/CRITICAL)
+// 구조화 메타데이터(검색용): rid(요청 ID), user(사용자 ID)
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  // 이 프로젝트(docker compose name: rag-base) 컨테이너만 수집
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "rag-base"
+    action        = "keep"
+  }
+  // compose 가 띄운 서비스 컨테이너만 (같은 이미지로 docker run 한 임시 컨테이너는 이미지 라벨 때문에 섞여 들어옴)
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_container_number"]
+    regex         = ".+"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_oneoff"]
+    regex         = "True"
+    action        = "drop"
+  }
+  // 모니터링 스택 자체 로그는 제외 (Grafana 가 조회할 때마다 남기는 로그가 앱 로그를 덮음)
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "grafana|loki|alloy"
+    action        = "drop"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.process.app.receiver]
+}
+
+loki.process "app" {
+  // 1) 파이썬 백엔드: 스택트레이스 등 여러 줄을 한 건으로 합침 (날짜로 시작하는 줄이 새 로그의 시작)
+  stage.match {
+    selector = "{service=~\"backend|ocr-backend\"}"
+
+    stage.multiline {
+      firstline     = "^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}"
+      max_wait_time = "3s"
+      max_lines     = 200
+    }
+  }
+
+  // 2) 레벨·요청ID·사용자 추출 (공통 형식)
+  stage.regex {
+    expression = "\\| (?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\\s*\\| rid=(?P<rid>[^ |]+)"
+  }
+  // nginx 오류 로그 (2026/11/13 05:21:02 [error] …)
+  stage.regex {
+    expression = "^\\d{4}/\\d{2}/\\d{2} [\\d:]+ \\[(?P<level>error|crit|alert|emerg|warn)\\]"
+  }
+  stage.replace {
+    source     = "level"
+    expression = "^(error|crit|alert|emerg)$"
+    replace    = "ERROR"
+  }
+  stage.replace {
+    source     = "level"
+    expression = "^(warn)$"
+    replace    = "WARNING"
+  }
+  // 파이썬 예외가 레벨 없이 찍힌 경우 (print 된 Traceback 등)
+  stage.match {
+    selector = "{service=~\"backend|ocr-backend\"} |~ \"^Traceback\""
+
+    stage.static_labels {
+      values = { level = "ERROR" }
+    }
+  }
+  stage.regex {
+    expression = " user=(?P<user>[^ ,)\\]]+)"
+  }
+
+  stage.labels {
+    values = { level = "" }
+  }
+  stage.structured_metadata {
+    values = { rid = "", user = "" }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

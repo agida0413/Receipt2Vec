@@ -1,0 +1,46 @@
+# Grafana 알림 → Slack
+#   웹훅 URL 은 루트 .env 의 SLACK_WEBHOOK_URL (git 제외) 에서 주입 — 이 파일에는 비밀값 없음
+apiVersion: 1
+
+# 메시지 형식 (한국어)
+templates:
+  - orgId: 1
+    name: r2v-slack
+    template: |
+      {{ define "r2v.title" -}}
+      {{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}🚨{{ else }}⚠️{{ end }} [장애]{{ else }}✅ [해결]{{ end }} {{ .CommonLabels.alertname }}{{ if .CommonLabels.service }} · {{ .CommonLabels.service }}{{ end }}
+      {{- end }}
+
+      {{ define "r2v.text" -}}
+      {{ range .Alerts -}}
+      {{ if eq .Status "firing" }}•{{ else }}✓{{ end }} *{{ .Annotations.summary }}*
+      {{ if .Labels.message }}> `{{ .Labels.message }}`
+      {{ end -}}
+      {{ if .Annotations.description }}{{ .Annotations.description }}
+      {{ end -}}
+      _{{ if eq .Status "firing" }}발생{{ else }}해결{{ end }} {{ if eq .Status "firing" }}{{ .StartsAt.Local.Format "01-02 15:04:05" }}{{ else }}{{ .EndsAt.Local.Format "01-02 15:04:05" }}{{ end }}_{{ if .DashboardURL }} · <{{ .DashboardURL }}|대시보드 열기>{{ end }}
+      {{ end -}}
+      {{- end }}
+
+contactPoints:
+  - orgId: 1
+    name: slack-receipt2vec
+    receivers:
+      - uid: slack-receipt2vec
+        type: slack
+        settings:
+          url: ${SLACK_WEBHOOK_URL}
+          username: Receipt2Vec 관제
+          icon_emoji: ":rotating_light:"
+          title: '{{ template "r2v.title" . }}'
+          text: '{{ template "r2v.text" . }}'
+        disableResolveMessage: false
+
+# 모든 알림 → Slack. 같은 서비스·같은 알림은 묶어서 보내고, 계속되면 1시간마다 다시 알림
+policies:
+  - orgId: 1
+    receiver: slack-receipt2vec
+    group_by: ["alertname", "service"]
+    group_wait: 30s
+    group_interval: 2m
+    repeat_interval: 1h

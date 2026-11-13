@@ -9,6 +9,7 @@ from typing import Any, List, Optional, Tuple
 import httpx
 
 from app.core.config import settings
+from app.core.logging_setup import current_request_id
 from app.domain.transaction import Transaction
 
 
@@ -34,7 +35,8 @@ class TransactionStoreClient:
         body = {"userId": user_id, "transactions": [tx.model_dump(mode="json") for tx in txs]}
         try:
             async with httpx.AsyncClient(timeout=settings.store.timeout_sec, transport=self._transport) as c:
-                res = await c.post(self._url, json=body)
+                headers = {"X-Request-ID": rid} if (rid := current_request_id()) else {}
+                res = await c.post(self._url, json=body, headers=headers)
         except httpx.HTTPError as e:
             raise StoreUnavailableError(f"거래 저장소({self._url}) 연결 실패: {type(e).__name__}") from e
         if res.status_code >= 500:

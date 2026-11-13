@@ -104,7 +104,9 @@ class Settings:
             rec_model=get_env_optional("OCR_REC_MODEL", "korean_PP-OCRv5_mobile_rec"),
             use_doc_orientation=get_env_bool("OCR_USE_DOC_ORIENTATION", True),
             use_doc_unwarping=get_env_bool("OCR_USE_DOC_UNWARPING", False),
-            use_textline_orientation=get_env_bool("OCR_USE_TEXTLINE_ORIENTATION", True),
+            # 글줄 방향 분류: 짧은 품목·숫자 줄을 180도로 잘못 판단해 뒤집어 읽는 문제가 있어 기본 끔
+            # (사진 전체의 회전은 OCR_USE_DOC_ORIENTATION 이 보정 — 180°·90° 사진도 정상 인식 확인)
+            use_textline_orientation=get_env_bool("OCR_USE_TEXTLINE_ORIENTATION", False),
             det_limit_side_len=get_env_int("OCR_DET_LIMIT_SIDE_LEN", 1280),
             det_limit_type=get_env("OCR_DET_LIMIT_TYPE", "max"),
             min_score=get_env_float("OCR_MIN_SCORE", 0.5),

@@ -7,6 +7,8 @@ if str(_backend_root) not in sys.path:
 
 import logging
 
+from app.core.logging_setup import RequestLoggingMiddleware, setup_logging
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +17,7 @@ from app.api.endpoints import api_router
 from app.core.config import settings
 from app.services.ocr import ocr_engine
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)  # 모델 다운로드 요청 로그 억제
+setup_logging("ocr-backend")
 logger = logging.getLogger(__name__)
 
 # 서버 시작 시 OCR 모델 미리 로딩 (최초 실행 시 모델 다운로드로 수 분 소요)
@@ -43,6 +40,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggingMiddleware, service="ocr-backend")
 
 
 @app.get("/")

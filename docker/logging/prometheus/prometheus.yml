@@ -1,0 +1,13 @@
+# Prometheus: 컨테이너 지표 수집 (docker-exporter), 10초 간격, 7일 보관(compose 의 --storage.tsdb.retention.time)
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: docker
+    static_configs:
+      - targets: ["docker-exporter:9417"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

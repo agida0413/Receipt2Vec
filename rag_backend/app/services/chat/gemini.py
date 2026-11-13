@@ -113,9 +113,17 @@ async def call_with_retry(
     call: Callable[[], Awaitable[T]], *, guard: QuotaGuard, model_name: str, timeout: float,
 ) -> T:
     for attempt in range(MAX_ATTEMPTS):
+        t0 = time.perf_counter()
         try:
-            return await asyncio.wait_for(call(), timeout=timeout)
+            res = await asyncio.wait_for(call(), timeout=timeout)
+            usage = getattr(res, "usage_metadata", None)
+            logger.info(f"Gemini 호출 성공 model={model_name} ms={int((time.perf_counter() - t0) * 1000)} "
+                        f"attempt={attempt + 1} in_tokens={getattr(usage, 'prompt_token_count', None)} "
+                        f"out_tokens={getattr(usage, 'candidates_token_count', None)}")
+            return res
         except Exception as e:  # noqa: BLE001
+            logger.warning(f"Gemini 호출 실패 model={model_name} ms={int((time.perf_counter() - t0) * 1000)} "
+                           f"attempt={attempt + 1} error={type(e).__name__}: {str(e)[:300]}")
             delay = _handle_error(e, attempt, guard, model_name)
             await asyncio.sleep(delay)
     raise RuntimeError("unreachable")
@@ -130,15 +138,25 @@ async def stream_with_retry(
     """
     for attempt in range(MAX_ATTEMPTS):
         started = False
+        t0 = time.perf_counter()
+        first_ms = None
+        chunks = 0
         try:
             stream = await asyncio.wait_for(start(), timeout=timeout)
             async for chunk in stream:
                 text = getattr(chunk, "text", None)
                 if text:
+                    if not started:
+                        first_ms = int((time.perf_counter() - t0) * 1000)
                     started = True
+                    chunks += 1
                     yield text
+            logger.info(f"Gemini 스트리밍 완료 model={model_name} first_token_ms={first_ms} chunks={chunks} "
+                        f"ms={int((time.perf_counter() - t0) * 1000)} attempt={attempt + 1}")
             return
         except Exception as e:  # noqa: BLE001
+            logger.warning(f"Gemini 스트리밍 실패 model={model_name} started={started} chunks={chunks} "
+                           f"attempt={attempt + 1} error={type(e).__name__}: {str(e)[:300]}")
             if started:
                 raise
             delay = _handle_error(e, attempt, guard, model_name)

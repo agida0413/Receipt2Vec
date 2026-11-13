@@ -5,6 +5,7 @@
 #   (챗봇·거래 저장소는 backend = rag_backend, 3001)
 #   docker compose up -d --build frontend              # 챗봇 화면 http://localhost:3000
 #   docker compose --profile dashboards up -d --build  # + OpenSearch Dashboards(5601)
+#   docker compose --profile logging up -d             # + 모니터링 Grafana(3030): 로그(Loki·Alloy) · 컨테이너 지표(cAdvisor·Prometheus)
 # 설정값은 rag_backend/.env 를 그대로 사용하고, 컨테이너 간 접속 정보만 아래에서 덮어씀
 # =============================================================================
 name: rag-base
@@ -122,7 +123,117 @@ services:
       - backend
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # 로그 모니터링 (선택): docker compose --profile logging up -d
+  #   Alloy 가 Docker 소켓으로 rag-base 컨테이너 로그를 실시간 수집 → Loki 저장(7일) → Grafana 조회
+  #   Grafana http://localhost:3030  (admin / GRAFANA_ADMIN_PASSWORD, 기본 admin)
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: ragbase-loki
+    profiles: ["logging"]
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./docker/logging/loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready | grep -q ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.7.1
+    container_name: ragbase-alloy
+    profiles: ["logging"]
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./docker/logging/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "${ALLOY_PUBLISH_PORT:-12345}:12345"   # 수집 상태 UI
+    depends_on:
+      loki:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 컨테이너 지표 (실행·헬스 상태, 재시작, CPU·메모리·네트워크·디스크) → Prometheus → Grafana '컨테이너' 대시보드
+  # (cAdvisor 는 Docker Desktop 의 containerd 이미지 저장소에서 컨테이너를 식별 못해 Docker API 로 직접 수집)
+  docker-exporter:
+    image: python:3.11-slim
+    container_name: ragbase-docker-exporter
+    profiles: ["logging"]
+    command: ["python", "-u", "/app/exporter.py"]
+    environment:
+      COMPOSE_PROJECT: rag-base
+    volumes:
+      - ./docker/logging/docker-exporter/exporter.py:/app/exporter.py:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: ragbase-prometheus
+    profiles: ["logging"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./docker/logging/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - docker-exporter
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: ragbase-grafana
+    profiles: ["logging"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_LANGUAGE: ko-KR
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/receipt2vec-logs.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # 알림 메시지의 '대시보드 열기' 링크 주소, 알림 시각 표시용 시간대
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3030}
+      TZ: Asia/Seoul
+      # Slack 알림 웹훅 (루트 .env, git 제외) → provisioning/alerting/slack.yaml 에서 사용
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./docker/logging/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/logging/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PUBLISH_PORT:-3030}:3000"
+    depends_on:
+      loki:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+# -----------------------------------------------------------------------------
+# 영속 볼륨: docker compose down / 재부팅 후에도 유지 (삭제는 down -v 또는 docker volume rm 일 때만)
+#   이름을 고정해 두어 프로젝트명·폴더명이 바뀌어도 같은 볼륨을 다시 사용 (기존 rag-base_* 그대로)
+# -----------------------------------------------------------------------------
 volumes:
-  opensearch-data:
-  hf-cache:
-  paddle-cache:
+  opensearch-data:      # 거래 데이터·인덱스 (가장 중요)
+    name: rag-base_opensearch-data
+  hf-cache:             # 임베딩·리랭커 모델 (없으면 재다운로드 ~3GB)
+    name: rag-base_hf-cache
+  paddle-cache:         # PaddleOCR 모델
+    name: rag-base_paddle-cache
+  loki-data:            # 수집된 로그 (7일 보관)
+    name: rag-base_loki-data
+  alloy-data:           # 로그 수집 위치 (재시작 시 중복·누락 방지)
+    name: rag-base_alloy-data
+  grafana-data:         # Grafana 계정·설정
+    name: rag-base_grafana-data
+  prometheus-data:      # 컨테이너 지표 (7일 보관)
+    name: rag-base_prometheus-data

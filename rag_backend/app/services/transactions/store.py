@@ -18,6 +18,7 @@ import hashlib
 import logging
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -452,7 +453,7 @@ def _matched_items(hit: Dict[str, Any]) -> List[str]:
         if name:
             # 품목 가격을 함께 ('새우깡 얼마였지' 에 영수증 전체 금액이 아니라 품목 금액으로 답하도록)
             label = f"{name} x{qty}" if qty and qty != 1 else name
-            out.append(f"{label} {int(amount):,}원" if amount is not None else label)
+            out.append(f"{label} {int(amount):,}원" if amount else label)  # 0원 = 가격 없음 → 금액 생략
     return out
 
 
@@ -531,6 +532,8 @@ class TransactionStore:
             self._client = OpenSearch(
                 hosts=[{"host": cfg.host, "port": cfg.port}],
                 use_ssl=False, verify_certs=False, timeout=30, max_retries=1, retry_on_timeout=False,
+                # 기본 풀 1개 → 동시 요청(거래 목록·요약·챗봇) 때마다 'Connection pool is full' 경고와 재연결
+                pool_maxsize=10,
             )
         return self._client
 
@@ -623,25 +626,35 @@ class TransactionStore:
     def save(self, user_id: str, txs: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
         saved, duplicates = [], []
         now = datetime.now(timezone.utc).isoformat()
+        started = time.perf_counter()
 
         def run(client):
             for tx in txs:
                 key, doc = self.prepare(user_id, {k: v for k, v in tx.items() if k != "createdAt"}, now)
                 tx_id = doc.get("transactionId")
+                m = doc.get("merchant") or {}
+                desc = (f"tx={tx_id} merchant={m.get('name')!r} category={m.get('category')} "
+                        f"date={doc.get('transactedDate')} amount={(doc.get('amount') or {}).get('total')} "
+                        f"items={len(doc.get('items') or [])} embedding={'embedding' in doc}")
                 try:
                     client.index(index=self.alias, id=key, body=doc, op_type="create")
                     saved.append(tx_id)
+                    logger.info(f"거래 저장 user={user_id} {desc}")
                 except Exception as e:  # noqa: BLE001
                     status = getattr(e, "status_code", None)
                     if status == 409:
                         duplicates.append(tx_id)
+                        logger.info(f"중복 거래 건너뜀 user={user_id} {desc} dedupKey={key[:12]}")
                     elif status == 400:
+                        logger.error(f"거래 저장 거부(매핑 불일치) user={user_id} {desc} error={e}")
                         raise InvalidTransactionError(f"거래 {tx_id} 저장 거부 (매핑 불일치): {e}") from e
                     else:
                         raise
             client.indices.refresh(index=self.alias)
 
         self._call(run)
+        logger.info(f"저장 완료 user={user_id} 요청={len(txs)} saved={len(saved)} duplicates={len(duplicates)} "
+                    f"ms={int((time.perf_counter() - started) * 1000)}")
         return saved, duplicates
 
     def recent(self, user_id: str, limit: int = 20) -> List[TransactionRow]:
@@ -659,7 +672,9 @@ class TransactionStore:
             {"term": {"userId": user_id}}, {"term": {"transactionId": transaction_id}},
         ]}}}
         res = self._call(lambda c: c.delete_by_query(index=self.alias, body=body, refresh=True))
-        return int(res.get("deleted", 0))
+        deleted = int(res.get("deleted", 0))
+        (logger.info if deleted else logger.warning)(f"거래 삭제 user={user_id} tx={transaction_id} deleted={deleted}")
+        return deleted
 
     def vocabulary(self, user_id: str, size: int = 50) -> "UserVocabulary":
         """이 사용자의 실제 가맹점·업종·간편결제 목록 (질문 해석 LLM 이 검색어를 실제 값에 맞추도록)"""
@@ -704,24 +719,31 @@ class TransactionStore:
         min_score = settings.transactions.semantic_min_score
         # 절대 기준 + 1등 대비 상대 기준 (꼬리의 애매한 후보 제거)
         keep = [h["_id"] for h, s in zip(hits, best) if s >= min_score and s >= top * 0.3]
-        logger.info(f"의미 검색 '{query}': 후보 {len(hits)}건 → 채택 {len(keep)}건 (최고 {top:.3f})")
+        logger.info(f"의미 검색 query={query!r} candidates={len(hits)} kept={len(keep)} top={top:.3f} "
+                    f"min={min_score} scores={[round(x, 3) for x in sorted(best, reverse=True)[:5]]}")
         return keep
 
     def query(self, q: TransactionQuery) -> TransactionQueryResult:
+        started = time.perf_counter()
+        stages: List[str] = []
+
         def search(body):
             body["_source"] = {"excludes": ["embedding"]}
             return self._call(lambda c: c.search(index=self.alias, body=body))
 
         result = _parse_result(search(build_search_body(q)), q.groupBy)
+        stages.append(f"exact={result.total}")
         if q.has_text():
             result.matchType = MatchType.EXACT
             if result.total == 0 and len(text_groups(q)) > 1:
                 relaxed = _parse_result(search(build_search_body(q, relaxed=True)), q.groupBy)
+                stages.append(f"relaxed={relaxed.total}")
                 if relaxed.total:
                     relaxed.matchType = MatchType.RELAXED
                     result = relaxed
             if result.total == 0:
                 ids = self._semantic_ids(q)
+                stages.append(f"semantic={len(ids)}")
                 if ids:
                     semantic = _parse_result(search(build_search_body(_without_text(q), ids=ids)), q.groupBy)
                     if semantic.total:
@@ -730,6 +752,10 @@ class TransactionStore:
         if result.total == 0:
             # '이 조건에 없음' 과 '아직 저장한 거래가 없음' 을 구분해서 안내하기 위함
             result.userTotal = self.count(q.userId)
+        cond = {k: v for k, v in q.model_dump(mode="json", exclude={"userId", "mode", "limit"}).items()
+                if v not in (None, [], "", "NONE", "DATE", "SUM")}
+        logger.info(f"거래 질의 user={q.userId} mode={q.mode.value} total={result.total} match={result.matchType.value} "
+                    f"stages=[{', '.join(stages)}] ms={int((time.perf_counter() - started) * 1000)} cond={cond}")
         return result
 
 

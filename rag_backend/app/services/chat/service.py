@@ -24,6 +24,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.logging_setup import short
 from app.services.chat import period as period_mod
 from app.services.chat.answerer import LlmAnswerer, stream_template, template_answer
 from app.services.chat.gemini import QuotaExceededError, QuotaGuard, shared_quota_guard
@@ -108,6 +109,18 @@ def daily_average(plan: QueryPlan, found: TransactionQueryResult) -> Transaction
     return found
 
 
+def _filters(plan: QueryPlan) -> Dict[str, Any]:
+    """로그용: 값이 있는 필터만"""
+    keys = ("provider", "method", "cardCompany", "status", "minAmount", "maxAmount", "weekdays", "hourFrom", "hourTo",
+            "limit")
+    out = {}
+    for k in keys:
+        v = getattr(plan, k)
+        if v not in (None, []):
+            out[k] = v.value if hasattr(v, "value") else v
+    return out
+
+
 class ChatService:
     def __init__(self, store: TransactionStore, guard: QuotaGuard):
         self.store = store
@@ -126,14 +139,22 @@ class ChatService:
 
     async def stream(self, req: ChatRequest) -> AsyncIterator[str]:
         started = time.perf_counter()
+        logger.info(f"질문 접수 user={req.userId} history={len(req.history)} q={short(req.message, 200)}")
         try:
             # 1) 질문 전처리 (사용자 데이터 어휘로 증강)
             yield sse("status", {"step": "plan", "message": "질문을 이해하는 중…"})
+            t0 = time.perf_counter()
             vocab = await self._vocabulary(req.userId)
             plan, planner_name, notice = await make_plan(req.message, req.history, self.planner, vocab)
             if notice:
+                logger.warning(f"질문 해석 대체 사용 user={req.userId} planner={planner_name} reason={short(notice)}")
                 yield sse("notice", {"message": notice})
             rng = period_mod.resolve(plan.period)
+            logger.info(
+                f"질문 해석 user={req.userId} planner={planner_name} ms={int((time.perf_counter() - t0) * 1000)} "
+                f"intent={plan.intent.value} period={rng.label if rng else '전체'} metric={plan.metric.value} "
+                f"groupBy={plan.groupBy.value} terms={plan.search_terms()} "
+                f"filters={_filters(plan)} vocab={vocab.total if vocab else '-'}")
             yield sse("plan", {
                 "plan": plan.model_dump(mode="json"), "searchTerms": plan.search_terms(), "planner": planner_name,
                 "range": {"start": rng.start.isoformat(), "end": rng.end.isoformat(), "label": rng.label}
@@ -145,6 +166,7 @@ class ChatService:
             if plan.intent != Intent.SMALLTALK:
                 yield sse("status", {"step": "query", "message": "거래를 조회하는 중…"})
                 try:
+                    t0 = time.perf_counter()
                     found = await run_in_threadpool(self.store.query, plan_to_query(req.userId, plan, rng))
                     inferred = inferred_only_terms(plan, req.message)
                     if found.total == 0 and inferred and not req.history:
@@ -157,23 +179,38 @@ class ChatService:
                             found = retry
                     found = daily_average(plan, item_level(plan, found))
                 except StoreUnavailableError as e:
-                    logger.error(str(e))
+                    logger.error(f"거래 저장소 연결 실패 user={req.userId} error={e}")
                     yield sse("error", {"message": "거래 저장소(OpenSearch)에 연결할 수 없어요. "
                                                    "docker compose 로 opensearch 가 떠 있는지 확인해 주세요."})
                     return
                 result = QueryResult(**found.model_dump(), intent=plan.intent,
                                      periodLabel=rng.label if rng else "전체 기간")
+                logger.info(
+                    f"거래 조회 user={req.userId} ms={int((time.perf_counter() - t0) * 1000)} total={result.total} "
+                    f"match={result.matchType.value} sum={result.aggregates.get('sum')} "
+                    f"itemSum={result.itemAggregates.get('sum') if result.itemAggregates else None} "
+                    f"groups={[g.get('key') for g in result.groups[:3]]} userTotal={result.userTotal}")
+                if result.total == 0:
+                    logger.warning(f"조회 결과 0건 user={req.userId} q={short(req.message)} terms={plan.search_terms()} "
+                                   f"period={rng.label if rng else '전체'} stored={result.userTotal}")
                 yield sse("result", result.model_dump(mode="json"))
 
             # 3) 답변
             yield sse("status", {"step": "answer", "message": "답변을 작성하는 중…"})
             used: Dict[str, str] = {}
+            t0 = time.perf_counter()
+            chars = 0
             async for ev in self._answer(req, plan, result, used):
+                if ev.startswith("event: token"):
+                    chars += len(json.loads(ev.split("data: ", 1)[1])["text"])
                 yield ev
+            total_ms = int((time.perf_counter() - started) * 1000)
+            logger.info(f"답변 완료 user={req.userId} answerer={used.get('answerer', 'template')} chars={chars} "
+                        f"answer_ms={int((time.perf_counter() - t0) * 1000)} total_ms={total_ms}")
             yield sse("done", {"planner": planner_name, "answerer": used.get("answerer", "template"),
-                               "elapsedMs": int((time.perf_counter() - started) * 1000)})
+                               "elapsedMs": total_ms})
         except Exception as e:  # noqa: BLE001
-            logger.exception("챗봇 처리 실패")
+            logger.exception(f"챗봇 처리 실패 user={req.userId} q={short(req.message)} error={type(e).__name__}: {e}")
             yield sse("error", {"message": f"처리 중 오류가 발생했어요: {type(e).__name__}"})
 
     async def _answer(self, req: ChatRequest, plan, result, used: Dict[str, str]) -> AsyncIterator[str]:
@@ -191,7 +228,7 @@ class ChatService:
                 used["answerer"] = f"llm:{self.answerer.model_name}"
                 return
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"LLM 답변 실패 → 템플릿 사용: {e}")
+                logger.warning(f"LLM 답변 실패 → 템플릿 사용 user={req.userId} sent={sent} error={type(e).__name__}: {e}")
                 if sent:
                     used["answerer"] = f"llm:{self.answerer.model_name}(중단)"
                     yield sse("token", {"text": "\n\n(답변 생성이 중단되었어요)"})
