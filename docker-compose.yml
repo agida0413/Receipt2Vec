@@ -212,20 +212,27 @@ services:
   # API 게이트웨이 (단일 진입점): 경로별 라우팅 + 인스턴스 로드밸런싱
   #   http://localhost:3000 → /api/ocr → ocr-backend, /api/auth·/oauth2·/login/oauth2 → auth-server,
   #                            /api → backend(rag), 그 외 → frontend
-  #   배포: GATEWAY_PUBLISH_PORT=80, SERVER_NAME=도메인 (HTTPS 는 docker/gateway/templates 하단 안내)
+  #   운영(도메인+HTTPS): dev-ops/deploy (DOMAIN=kyj.ai.kr, 80/443, certbot 이 Let's Encrypt 인증서 발급·갱신)
+  #     인증서가 생기면 gateway 가 재시작 없이 HTTPS 로 전환 (docker/gateway/r2v/start.sh)
+  #   로컬: DOMAIN 없음 → http://localhost:3000
   #   인스턴스 늘리기: 해당 서비스의 container_name 을 지우고 docker compose up -d --scale backend=3
   #     → gateway 가 Docker DNS 로 새 인스턴스를 찾아 자동 분산 (재시작 불필요)
   # ---------------------------------------------------------------------------
   gateway:
     image: nginx:1.28.0-alpine
     container_name: receipt2vec-gateway
+    command: ["sh", "/etc/nginx/r2v/start.sh"]
     environment:
       SERVER_NAME: ${SERVER_NAME:-localhost}
+      DOMAIN: ${DOMAIN:-}
     ports:
       - "${GATEWAY_PUBLISH_PORT:-3000}:80"   # OAuth 콜백(localhost:3000)이 그대로 동작하도록 3000
     volumes:
       # *.template 은 시작 시 환경변수 치환 → /etc/nginx/conf.d/
       - ./docker/gateway/templates:/etc/nginx/templates:ro
+      - ./docker/gateway/r2v:/etc/nginx/r2v:ro          # 라우팅·HTTPS 설정·시작 스크립트
+      - letsencrypt:/etc/letsencrypt:ro                 # 인증서 (certbot 이 기록)
+      - certbot-www:/var/www/certbot:ro                 # 인증서 발급 확인용 파일
     depends_on:
       - frontend
       - backend
@@ -358,3 +365,7 @@ volumes:
     name: rag-base_redis-data
   auth-keys:            # JWT 서명 키 (없어지면 발급된 토큰 전부 무효)
     name: rag-base_auth-keys
+  letsencrypt:          # HTTPS 인증서·계정 (운영, certbot)
+    name: rag-base_letsencrypt
+  certbot-www:          # 인증서 발급 확인용 파일 (certbot → gateway)
+    name: rag-base_certbot-www

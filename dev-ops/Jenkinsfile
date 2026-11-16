@@ -125,23 +125,22 @@ pipeline {
         stage('Smoke test (external)') {
             when { expression { params.DEPLOY && (params.PUSH_IMAGES || params.DEPLOY_ONLY) } }
             steps {
-                sh '''
-                    set -e
-                    curl -fsS --max-time 10 "http://${RAG_HOST}/gateway/health"
-                    echo
-                    curl -fsS --max-time 10 "http://${RAG_HOST}/api/auth/providers"
-                    echo
-                    # 토큰 없는 API 호출은 401 이어야 함 (인증 검사 동작 확인)
-                    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://${RAG_HOST}/api/transactions")
-                    [ "$code" = 401 ] || { echo "인증 없이 $code 응답 — 인증 검사 확인 필요"; exit 1; }
-                    echo "외부 확인 통과: gateway·auth 정상, 인증 없는 API 401"
-                '''
+                script {
+                    // 도메인(HTTPS)으로 확인. DNS·인증서가 아직이면 IP(HTTP)로 확인하고 UNSTABLE 로 표시
+                    def rc = sh(returnStatus: true, script: 'bash dev-ops/scripts/smoke-test.sh')
+                    if (rc == 2) {
+                        unstable('도메인(HTTPS) 접속 전 단계 — 서비스는 IP 로 정상. DNS A 레코드·인증서 발급 확인')
+                    } else if (rc != 0) {
+                        error('외부 확인 실패 — 서비스 이상')
+                    }
+                }
             }
         }
     }
 
     post {
         success { script { notifySlack('good', "배포 성공 :white_check_mark:") } }
+        unstable { script { notifySlack('warning', "배포됨, 도메인(HTTPS) 확인 필요 :warning:") } }
         failure { script { notifySlack('danger', "빌드/배포 실패 :x:") } }
         always {
             sh 'rm -rf deploy-bundle .docker-ci || true; docker image prune -f >/dev/null 2>&1 || true'
@@ -153,7 +152,7 @@ def notifySlack(String color, String title) {
     withCredentials([string(credentialsId: 'slack-webhook', variable: 'SLACK_URL')]) {
         if (!env.SLACK_URL?.trim()) { return }
         def text = "${title}\\n*${env.JOB_NAME}* #${env.BUILD_NUMBER} `${env.GIT_SHA ?: '-'}` ${env.GIT_MSG ?: ''}\\n" +
-                   "대상: ${env.RAG_HOST} · 태그: ${params.DEPLOY_TAG} · <${env.BUILD_URL}|빌드 로그>"
+                   "대상: ${env.PUBLIC_BASE_URL ?: env.RAG_HOST} · 태그: ${params.DEPLOY_TAG} · <${env.BUILD_URL}|빌드 로그>"
         writeFile file: '.slack.json', text: groovy.json.JsonOutput.toJson(
             [attachments: [[color: color, text: text.replace('\\n', '\n'), mrkdwn_in: ['text']]]])
         sh 'curl -fsS -X POST -H "Content-Type: application/json" --data @.slack.json "$SLACK_URL" >/dev/null || true; rm -f .slack.json'

@@ -36,15 +36,19 @@ docker image prune -f >/dev/null
 echo "[deploy] 컨테이너 교체 완료"
 
 # rag backend 는 임베딩·리랭커 모델 로딩에 수 분 걸림 → 최대 15분 대기
-ok() { curl -fs -o /dev/null --max-time 5 "$1"; }
+# HTTPS 전환 후에는 HTTP 가 리다이렉트(301)만 하므로 HTTPS 로 확인 (서버 안이라 인증서 이름 검사는 생략 -k)
+ok() { curl -fsk -o /dev/null --max-time 5 "$1"; }
 for i in $(seq 1 90); do
   g=0; a=0; b=0
-  ok http://localhost/gateway/health && g=1
-  ok http://localhost/api/auth/providers && a=1
+  BASE=http://localhost
+  ok https://localhost/gateway/health && BASE=https://localhost
+  ok $BASE/gateway/health && g=1
+  ok $BASE/api/auth/providers && a=1
   docker exec ragbase-backend python -c "import urllib.request;urllib.request.urlopen('http://localhost:3001/', timeout=3)" \
     >/dev/null 2>&1 && b=1
   if [ $g$a$b = 111 ]; then
-    echo "[deploy] 상태 확인 통과 (${i}회차): gateway·auth-server·rag backend 정상"
+    echo "[deploy] 상태 확인 통과 (${i}회차, ${BASE%%:*}): gateway·auth-server·rag backend 정상"
+    [ "$BASE" = http://localhost ] && echo "[deploy] 아직 HTTP 모드 — 인증서 발급 상태: docker logs ragbase-certbot --tail 5"
     $C ps --format 'table {{.Name}}\t{{.Image}}\t{{.Status}}'
     exit 0
   fi
