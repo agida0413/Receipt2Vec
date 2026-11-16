@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { recognizeReceipt, saveTransactions } from '../api.js'
 import { METHOD_KO, REVIEW_REASON_KO, STATUS_KO, won } from '../format.js'
-import { IconAlert, IconCheck, IconClose, IconImage, IconSparkle, IconUpload } from './icons.jsx'
+import { IconAlert, IconCamera, IconCheck, IconClose, IconImage, IconSparkle, IconUpload } from './icons.jsx'
 import { useToast } from './Toast.jsx'
 
 const STEPS = ['사진 선택', '인식 결과 확인', '저장 완료']
@@ -21,6 +21,7 @@ export default function UploadDialog({ userId, onClose, onSaved }) {
   const [dragging, setDragging] = useState(false)
   const [msgIndex, setMsgIndex] = useState(0)
   const fileInput = useRef(null)
+  const cameraInput = useRef(null)
 
   const busy = phase === 'recognizing' || phase === 'saving'
   const step = phase === 'done' ? 2 : phase === 'review' || phase === 'saving' ? 1 : 0
@@ -139,6 +140,9 @@ export default function UploadDialog({ userId, onClose, onSaved }) {
                 tabIndex={0}
               >
                 <input ref={fileInput} type="file" accept="image/*" hidden onChange={(e) => pick(e.target.files?.[0])} />
+                {/* 모바일: 후면 카메라로 바로 촬영 */}
+                <input ref={cameraInput} type="file" accept="image/*" capture="environment" hidden
+                  onChange={(e) => pick(e.target.files?.[0])} />
                 {preview ? (
                   <div className="preview">
                     <img src={preview} alt="선택한 사진" />
@@ -155,8 +159,17 @@ export default function UploadDialog({ userId, onClose, onSaved }) {
                 ) : (
                   <div className="drop-empty">
                     <span className="drop-icon"><IconUpload size={26} /></span>
-                    <b>사진을 끌어다 놓거나 클릭해서 선택하세요</b>
+                    <b className="only-pointer">사진을 끌어다 놓거나 클릭해서 선택하세요</b>
+                    <b className="only-touch">영수증을 찍거나 앨범에서 골라 주세요</b>
                     <span className="muted small">종이 영수증, 카카오페이·토스 결제내역 캡처 (JPG·PNG)</span>
+                    <div className="pick-buttons only-touch" onClick={(e) => e.stopPropagation()}>
+                      <button type="button" className="btn primary" onClick={() => cameraInput.current?.click()}>
+                        <IconCamera size={18} />카메라로 찍기
+                      </button>
+                      <button type="button" className="btn outline" onClick={() => fileInput.current?.click()}>
+                        <IconImage size={18} />앨범에서 선택
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

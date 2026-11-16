@@ -14,6 +14,8 @@ const SUGGESTIONS = [
 
 let seq = 0
 const newId = () => `m${Date.now()}-${seq++}`
+// 터치 화면 (모바일): 보낸 뒤 키보드를 닫아 답변이 가려지지 않게, 답변 후 자동으로 키보드를 다시 열지 않음
+const isTouch = () => typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches
 
 // ---------------------------------------------------------------------------
 // 한 글자씩 출력 (서버 토큰이 몰려 와도 일정한 속도로, 밀리면 조금 빠르게)
@@ -93,6 +95,7 @@ export default function ChatPanel({ userId, resetKey, onAsked }) {
     if (!message || busy || !userId) return
     setInput('')
     stickRef.current = true
+    if (isTouch()) inputRef.current?.blur()
 
     // 후속 질문 해석용 이전 대화 (완료된 메시지만)
     const history = messages
@@ -152,7 +155,7 @@ export default function ChatPanel({ userId, resetKey, onAsked }) {
       setBusy(false)
       abortRef.current = null
       onAsked?.()
-      inputRef.current?.focus()
+      if (!isTouch()) inputRef.current?.focus()
     }
   }
 
@@ -218,6 +221,8 @@ export default function ChatPanel({ userId, resetKey, onAsked }) {
             placeholder={userId ? '지출에 대해 무엇이든 물어보세요' : '먼저 사용자를 선택하세요'}
             disabled={!userId}
             maxLength={500}
+            enterKeyHint="send"
+            autoComplete="off"
           />
           {busy ? (
             <button type="button" className="send-btn stop" onClick={() => abortRef.current?.abort()} aria-label="생성 중지" title="생성 중지">
@@ -229,7 +234,7 @@ export default function ChatPanel({ userId, resetKey, onAsked }) {
             </button>
           )}
         </form>
-        <p className="composer-hint">답변은 저장된 거래만 근거로 하며, 금액·건수는 데이터에서 직접 계산해요.</p>
+        <p className="composer-hint hide-mobile">답변은 저장된 거래만 근거로 하며, 금액·건수는 데이터에서 직접 계산해요.</p>
       </div>
     </section>
   )
