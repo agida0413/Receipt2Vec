@@ -68,19 +68,30 @@ services:
     command:
       - |
         trap exit TERM
-        ARGS=""
-        for d in $$CERT_DOMAINS; do ARGS="$$ARGS -d $$d"; done
-        if [ -n "$$CERT_EMAIL" ]; then ARGS="$$ARGS --email $$CERT_EMAIL --no-eff-email"; else ARGS="$$ARGS --register-unsafely-without-email"; fi
+        EMAIL="--register-unsafely-without-email"
+        [ -n "$$CERT_EMAIL" ] && EMAIL="--email $$CERT_EMAIL --no-eff-email"
+        # DNS 가 실제로 조회되는 이름만 인증서에 넣음 (하나라도 안 풀리면 발급 전체가 실패하므로)
+        resolvable() { python3 -c "import socket,sys; socket.gethostbyname(sys.argv[1])" "$$1" 2>/dev/null; }
         sleep 20
         while :; do
-          if certbot certonly --webroot -w /var/www/certbot --cert-name "$$DOMAIN" $$ARGS \
-               --agree-tos --non-interactive --keep-until-expiring --expand; then
-            echo "[certbot] 인증서 정상 ($$CERT_DOMAINS) → 12시간 후 다시 확인"
-            sleep 12h & wait $$!
-          else
-            echo "[certbot] 발급 실패: DNS A 레코드($$CERT_DOMAINS → 서버 IP)와 80 포트를 확인하세요 → 10분 후 재시도"
-            sleep 10m & wait $$!
-          fi
+          ARGS=""; NAMES=""; SEEN=""
+          for d in $$DOMAIN $$CERT_DOMAINS; do
+            case " $$SEEN " in *" $$d "*) continue ;; esac
+            SEEN="$$SEEN $$d"
+            if resolvable "$$d"; then ARGS="$$ARGS -d $$d"; NAMES="$$NAMES $$d"
+            else echo "[certbot] DNS 미조회 → 이번 발급에서 제외: $$d"; fi
+          done
+          case " $$NAMES " in
+            *" $$DOMAIN "*)
+              if certbot certonly --webroot -w /var/www/certbot --cert-name "$$DOMAIN" $$ARGS $$EMAIL \
+                   --agree-tos --non-interactive --keep-until-expiring --expand; then
+                echo "[certbot] 인증서 정상 ($$NAMES) → 12시간 후 다시 확인"
+                sleep 12h & wait $$!; continue
+              fi
+              echo "[certbot] 발급 실패: 80 포트·DNS 를 확인하세요 → 10분 후 재시도" ;;
+            *) echo "[certbot] 대표 주소 $$DOMAIN 의 DNS 가 아직 없음 → 10분 후 재시도" ;;
+          esac
+          sleep 10m & wait $$!
         done
     volumes:
       - letsencrypt:/etc/letsencrypt
