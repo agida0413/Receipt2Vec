@@ -19,7 +19,8 @@ has_cert() { [ -n "${DOMAIN:-}" ] && [ -s "$CERT" ]; }
 apply() {
   if has_cert; then
     envsubst '${DOMAIN} ${SERVER_NAME}' < /etc/nginx/r2v/https.conf.template > /etc/nginx/conf.d/https.conf
-    echo 'location / { return 301 https://$host$request_uri; }' > "$RUNTIME/http-mode.conf"
+    # HTTP 는 모두 대표 주소의 HTTPS 로 (kyj.ai.kr·IP 로 와도 https://${DOMAIN})
+    echo "location / { set \$route redirect; return 301 https://${DOMAIN}\$request_uri; }" > "$RUNTIME/http-mode.conf"
     MODE=https
   else
     rm -f /etc/nginx/conf.d/https.conf

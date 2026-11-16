@@ -37,11 +37,12 @@ echo "[deploy] 컨테이너 교체 완료"
 
 # rag backend 는 임베딩·리랭커 모델 로딩에 수 분 걸림 → 최대 15분 대기
 # HTTPS 전환 후에는 HTTP 가 리다이렉트(301)만 하므로 HTTPS 로 확인 (서버 안이라 인증서 이름 검사는 생략 -k)
-ok() { curl -fsk -o /dev/null --max-time 5 "$1"; }
+# HTTPS 는 대표 주소 이름으로 서버 자신에게 접속 (--resolve), 다른 이름은 리다이렉트만 하므로
+ok() { curl -fsk -o /dev/null --max-time 5 ${DOMAIN:+--resolve "$DOMAIN:443:127.0.0.1"} "$1"; }
 for i in $(seq 1 90); do
   g=0; a=0; b=0
   BASE=http://localhost
-  ok https://localhost/gateway/health && BASE=https://localhost
+  [ -n "${DOMAIN:-}" ] && ok "https://$DOMAIN/gateway/health" && BASE="https://$DOMAIN"
   ok $BASE/gateway/health && g=1
   ok $BASE/api/auth/providers && a=1
   docker exec ragbase-backend python -c "import urllib.request;urllib.request.urlopen('http://localhost:3001/', timeout=3)" \

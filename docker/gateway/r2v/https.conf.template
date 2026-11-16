@@ -1,8 +1,11 @@
 # HTTPS 서버 — 인증서(/etc/letsencrypt/live/${DOMAIN})가 있을 때만 start.sh 가 conf.d/https.conf 로 생성
+#   ${DOMAIN}            : 대표 주소 → 앱 서비스
+#   그 외 이름·IP 로 접속 : 대표 주소로 리다이렉트 (로그인 쿠키·출처 검사가 대표 주소 기준이라 한 곳으로 모음)
+
 server {
     listen 443 ssl;
     http2 on;
-    server_name ${SERVER_NAME};
+    server_name ${DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
@@ -21,4 +24,23 @@ server {
     }
 
     include /etc/nginx/r2v/app-locations.conf;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log /dev/stdout gateway;
+
+    location = /gateway/health {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok","service":"gateway","tls":true}';
+    }
+    location / {
+        set $route redirect;
+        return 301 https://${DOMAIN}$request_uri;
+    }
 }
