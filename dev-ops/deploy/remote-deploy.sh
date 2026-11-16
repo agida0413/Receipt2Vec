@@ -22,7 +22,16 @@ C="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
 set -a; . ./.env; set +a
 echo "[deploy] 이미지 ${IMAGE_REPO}:*-${IMAGE_TAG:-latest} pull"
 $C pull --quiet
-$C up -d --remove-orphans --no-build
+if ! $C up -d --remove-orphans --no-build; then
+  # 어떤 컨테이너가 왜 죽었는지 Jenkins 로그에서 바로 보이게
+  echo "[deploy] 컨테이너 기동 실패 — 상태와 최근 로그:" >&2
+  $C ps -a >&2
+  for s in $($C ps -a --format '{{.Service}} {{.State}} {{.Health}}' | awk '$2!="running" || $3=="unhealthy"{print $1}'); do
+    echo "----- $s -----" >&2
+    $C logs --tail 30 "$s" >&2 || true
+  done
+  exit 1
+fi
 docker image prune -f >/dev/null
 echo "[deploy] 컨테이너 교체 완료"
 
