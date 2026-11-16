@@ -5,8 +5,10 @@
 # - 서버에서 빌드하지 않고 Docker Hub 이미지 사용 (IMAGE_REPO:<서비스>-<IMAGE_TAG>)
 #   IMAGE_TAG 기본 latest → 배포할 때마다 최신 이미지를 pull (pull_policy: always)
 #   롤백: Jenkins 에서 DEPLOY_TAG=<커밋 해시> 로 실행
-# - 외부 포트는 gateway(80)만. 백엔드·DB 포트를 닫아 모든 요청이 인증 검사(gateway)를 거치게 함
-# - `!reset` 은 Docker Compose 2.24+ 필요 (scripts/bootstrap-rag-host.sh 가 설치)
+# - 도메인·HTTPS: dev-ops/deploy/prod.env (DOMAIN=kyj.ai.kr)
+#   gateway 80/443 공개, certbot 이 Let's Encrypt 인증서를 발급·12시간마다 갱신 확인
+# - 외부 포트는 gateway(80/443)만. 백엔드·DB 포트를 닫아 모든 요청이 인증 검사(gateway)를 거치게 함
+# - `!reset`/`!override` 는 Docker Compose 2.24.4+ 필요 (scripts/bootstrap-rag-host.sh 가 설치)
 # =============================================================================
 services:
   opensearch:
@@ -32,6 +34,9 @@ services:
     build: !reset null
     pull_policy: always
     ports: !reset []
+    environment:
+      # auth_server/.env 의 값보다 우선 (HTTPS 운영에서는 리프레시 토큰 쿠키를 Secure 로)
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
 
   frontend:
     image: ${IMAGE_REPO}:frontend-${IMAGE_TAG:-latest}
@@ -46,3 +51,40 @@ services:
 
   gateway:
     pull_policy: always
+    ports: !override
+      - "80:80"
+      - "443:443"
+
+  # Let's Encrypt 인증서 발급·갱신 (webroot 방식: gateway 가 /.well-known/acme-challenge 를 서비스)
+  #   발급 실패(DNS 미설정·80 포트 막힘)면 10분마다 재시도, 발급 후에는 12시간마다 갱신 확인(만료 30일 전 갱신)
+  certbot:
+    image: certbot/certbot:v2.11.0
+    container_name: ragbase-certbot
+    environment:
+      DOMAIN: ${DOMAIN:?prod.env 의 DOMAIN 필요}
+      CERT_DOMAINS: ${CERT_DOMAINS:-${DOMAIN}}
+      CERT_EMAIL: ${CERT_EMAIL:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        trap exit TERM
+        ARGS=""
+        for d in $$CERT_DOMAINS; do ARGS="$$ARGS -d $$d"; done
+        if [ -n "$$CERT_EMAIL" ]; then ARGS="$$ARGS --email $$CERT_EMAIL --no-eff-email"; else ARGS="$$ARGS --register-unsafely-without-email"; fi
+        sleep 20
+        while :; do
+          if certbot certonly --webroot -w /var/www/certbot --cert-name "$$DOMAIN" $$ARGS \
+               --agree-tos --non-interactive --keep-until-expiring --expand; then
+            echo "[certbot] 인증서 정상 ($$CERT_DOMAINS) → 12시간 후 다시 확인"
+            sleep 12h & wait $$!
+          else
+            echo "[certbot] 발급 실패: DNS A 레코드($$CERT_DOMAINS → 서버 IP)와 80 포트를 확인하세요 → 10분 후 재시도"
+            sleep 10m & wait $$!
+          fi
+        done
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    depends_on:
+      - gateway
+    restart: unless-stopped

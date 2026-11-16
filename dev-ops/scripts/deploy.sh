@@ -32,6 +32,8 @@ chmod -R u=rwX,go=rX "$B"
 install -m 600 "$ROOT_ENV" "$B/.env"
 printf '\n# Jenkins 배포 (빌드 #%s, 커밋 %s)\nIMAGE_REPO=%s\nIMAGE_TAG=%s\n' \
   "${BUILD_NUMBER:-?}" "${GIT_SHA:-?}" "$IMAGE_REPO" "$TAG" >> "$B/.env"
+# 운영 도메인 설정 (저장소의 prod.env, 같은 이름이면 시크릿 env 보다 우선)
+{ echo; echo "# dev-ops/deploy/prod.env"; cat dev-ops/deploy/prod.env; } >> "$B/.env"
 install -m 600 "$RAG_ENV" "$B/rag_backend/.env"
 install -m 600 "$OCR_ENV" "$B/ocr_backend/.env"
 install -m 600 "$AUTH_ENV" "$B/auth_server/.env"
