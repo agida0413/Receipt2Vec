@@ -1,0 +1,17 @@
+{
+  "name": "Expense AI · Receipt2Vec",
+  "short_name": "Expense AI",
+  "description": "영수증과 결제내역을 올리면 지출을 찾아보고 계산해 주는 AI 가계부",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
+  "theme_color": "#4f5bd5",
+  "icons": [
+    { "src": "/brand/app-icon-256.png", "sizes": "256x256", "type": "image/png" },
+    { "src": "/brand/app-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/app-icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

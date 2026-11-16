@@ -14,6 +14,10 @@ export const IconReceipt = make(<>
   <path d="M6 3h12v18l-3-2-3 2-3-2-3 2z" /><path d="M9 8h6M9 12h6M9 16h3" />
 </>)
 export const IconPlus = make(<path d="M12 5v14M5 12h14" />)
+export const IconCamera = make(<>
+  <path d="M4 8a2 2 0 0 1 2-2h1.5l1.5-2h6l1.5 2H18a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+  <circle cx="12" cy="13" r="3.5" />
+</>)
 export const IconUpload = make(<>
   <path d="M12 16V4M7 9l5-5 5 5" /><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" />
 </>)

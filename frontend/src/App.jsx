@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { deleteTransaction, listTransactions, spendingSummary } from './api.js'
 import { loginErrorMessage, logout, onAuthChange, refreshSession } from './auth.js'
 import ChatPanel from './components/ChatPanel.jsx'
-import { IconMenu, IconPlus, IconUpload } from './components/icons.jsx'
+import { IconCamera, IconMenu, IconPlus, IconUpload } from './components/icons.jsx'
 import LoginScreen from './components/LoginScreen.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import { useToast } from './components/Toast.jsx'
@@ -133,6 +133,10 @@ function Workspace({ user, onLogout }) {
           </div>
           <div className="topbar-actions">
             <button className="icon-btn" onClick={newChat} aria-label="새 대화" title="새 대화"><IconPlus /></button>
+            {/* 모바일: 엄지로 바로 누르는 카메라 버튼 (데스크톱은 글자 버튼) */}
+            <button className="icon-btn brand only-mobile" onClick={() => setUploading(true)} aria-label="영수증 추가">
+              <IconCamera />
+            </button>
             <button className="btn primary sm hide-mobile" onClick={() => setUploading(true)}><IconUpload size={16} />영수증 추가</button>
           </div>
         </header>

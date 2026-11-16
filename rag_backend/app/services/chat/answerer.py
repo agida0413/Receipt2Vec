@@ -26,7 +26,8 @@ ANSWER_INSTRUCTION = """\
 4. 기간은 이번 조회 결과의 periodLabel 만 사용합니다. '전체 기간' 이면 특정 날짜를 말하지 마십시오.
 5. 이전 대화는 질문 맥락을 이해하는 데만 씁니다. 이전 답변에 나온 날짜·금액·건수를 다시 쓰지 말고,
    반드시 이번 '조회 결과' 의 값만 쓰십시오.
-6. 결과가 0건일 때: userTotal 이 0 이면 '아직 저장된 거래가 없다' 고 하고 영수증 업로드와 사용자 ID 확인을 안내합니다.
+6. 결과가 0건일 때: userTotal 이 0 이면 '아직 저장된 거래가 없다' 고 하고 영수증·결제내역 사진을 올려 달라고 안내합니다
+   (사용자는 로그인한 계정으로 구분되므로 '사용자 ID 확인' 같은 말은 하지 마십시오).
    userTotal 이 1 이상이면 검색어·기간 조건에 맞는 거래가 없다고 하고 저장된 전체 건수를 알려줍니다.
 7. '뭐 샀어' 처럼 품목을 묻는데 거래의 items 가 비어 있으면, 품목 정보는 저장되어 있지 않다고 말하고
    가맹점·날짜·금액을 알려줍니다 (결제앱 캡처는 품목이 없는 경우가 많습니다). 품목을 지어내지 마십시오.
@@ -100,8 +101,8 @@ def template_answer(plan: QueryPlan, result: Optional[QueryResult], message: str
     asks_items = bool(_ASKS_ITEMS.search(message))
     if result.total == 0:
         if result.userTotal == 0:
-            return ("아직 저장된 거래가 없어요. 왼쪽 '영수증 업로드' 로 영수증이나 결제내역을 먼저 등록해 주세요.\n"
-                    "(사용자 ID 별로 거래가 따로 저장돼요. 다른 ID 로 등록했다면 ID 를 바꿔 보세요.)")
+            return ("아직 저장된 거래가 없어요. '영수증 추가' 로 영수증이나 결제내역 사진을 먼저 올려 주세요.\n"
+                    "(모바일은 화면 위 카메라 버튼으로 바로 찍을 수 있어요.)")
         stored = f" (저장된 거래는 전체 {result.userTotal}건이에요)" if result.userTotal else ""
         return f"{label} {subject}조건에 맞는 거래가 없어요.{stored}"
     prefix = {MatchType.RELAXED: "조건에 딱 맞는 거래는 없어서, 일부 조건이 맞는 거래를 보여드려요.\n",
