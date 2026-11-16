@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
+from app.core.auth import resolve_user_id
 from app.core.config import settings
 from app.models import (
     ConfirmError, ConfirmRequest, ConfirmResponse, DocumentType, OcrLineOut, OcrResponse,
@@ -52,6 +53,7 @@ async def recognize(
     use_llm: bool = Form(True, description="false 면 LLM 을 전혀 사용하지 않음"),
     force_llm: Optional[bool] = Form(None, description="true 면 LLM 무조건 사용 (미지정 시 .env 의 LLM_MODE=always 여부)"),
 ):
+    user_id = resolve_user_id(user_id)   # 토큰 주인 (다른 사용자 ID 로 요청하면 403)
     data = await file.read()
     logger.info(f"인식 요청 user={user_id} file={file.filename!r} bytes={len(data)} type={document_type.value} "
                 f"use_llm={use_llm} force_llm={force_llm}")
@@ -112,6 +114,7 @@ async def recognize(
 
 @router.post("/parse", response_model=ParseTextResponse)
 async def parse_text(request: ParseTextRequest):
+    request.userId = resolve_user_id(request.userId)
     rows = [r.strip() for r in request.text.splitlines() if r.strip()]
     result = await extract_transactions(
         rows, doc_type=request.documentType, user_id=request.userId, use_llm=request.useLlm,
@@ -141,6 +144,7 @@ async def save_transactions(request: SaveTransactionsRequest):
     사용자 확인을 마친 거래 저장: confirm 과 같은 재검증(클라이언트가 /confirm 을 건너뛰어도 안전) 후
     rag_backend 거래 저장소로 전달. 중복 거래는 저장소가 건너뛰고 duplicates 로 알려준다.
     """
+    request.userId = resolve_user_id(request.userId)   # 토큰 주인의 거래로만 저장
     confirmed = confirm_transactions(request.transactions)
     invalid = [
         {"transactionId": tx.transactionId, "missingFields": tx.quality.missingFields}

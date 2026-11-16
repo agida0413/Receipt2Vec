@@ -263,7 +263,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "sum(count_over_time({project=\"rag-base\", service=\"frontend\"} |= \"path=/api/\" [$__range]))"
+          "expr": "sum(count_over_time({project=\"rag-base\", service=\"gateway\"} |= \"path=/api/\" [$__range]))"
         }
       ],
       "options": {
@@ -375,7 +375,7 @@
         {
           "refId": "A",
           "queryType": "instant",
-          "expr": "max(max_over_time({project=\"rag-base\", service=\"frontend\"} |= \"path=/api/\" | regexp \"ms=(?P<sec>[0-9.]+)\" | unwrap sec [$__range]))"
+          "expr": "max(max_over_time({project=\"rag-base\", service=\"gateway\"} |= \"path=/api/\" | regexp \"ms=(?P<sec>[0-9.]+)\" | unwrap sec [$__range]))"
         }
       ],
       "options": {
@@ -544,7 +544,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (status) (count_over_time({project=\"rag-base\", service=\"frontend\"} |= \"path=/api/\" | regexp \"status=(?P<status>[0-9])\" [$__auto]))",
+          "expr": "sum by (status) (count_over_time({project=\"rag-base\", service=\"gateway\"} |= \"path=/api/\" | regexp \"status=(?P<status>[0-9])\" [$__auto]))",
           "legendFormat": "{{status}}xx"
         }
       ],

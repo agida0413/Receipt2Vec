@@ -1,0 +1,4 @@
+# 시크릿 파일은 절대 커밋하지 않음 (README 만 예외)
+secrets/*
+!secrets/README.md
+.env

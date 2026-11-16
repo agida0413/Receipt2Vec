@@ -8,6 +8,7 @@ if str(_backend_root) not in sys.path:
 import logging
 
 from app.core.logging_setup import RequestLoggingMiddleware, setup_logging
+from app.core.auth import AuthMiddleware
 import os
 from dotenv import load_dotenv
 
@@ -70,6 +71,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 토큰 검증 (/api/* , 헬스체크 제외). 로깅 미들웨어가 바깥에 있어 401/403 도 로그에 남음
+app.add_middleware(AuthMiddleware)
 app.add_middleware(RequestLoggingMiddleware, service="rag-backend")
 
 @app.get("/")

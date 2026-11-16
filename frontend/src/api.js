@@ -1,3 +1,5 @@
+import { authFetch } from './auth.js'
+
 // 백엔드 API 호출 모음: /api/ocr/* → ocr_backend, 그 외 /api/* (챗봇·거래 목록) → rag_backend
 // 개발: vite proxy, 배포: nginx 가 /api 를 백엔드로 프록시하므로 상대 경로만 사용
 
@@ -19,7 +21,7 @@ async function jsonOrThrow(res) {
  * onEvent(eventName, data) 가 이벤트마다 호출된다.
  */
 export async function streamChat({ userId, message, history, signal, onEvent }) {
-  const res = await fetch('/api/chat/stream', {
+  const res = await authFetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
     body: JSON.stringify({ userId, message, history }),
@@ -63,12 +65,12 @@ export async function recognizeReceipt({ file, userId, forceLlm }) {
   form.append('file', file)
   form.append('user_id', userId)
   if (forceLlm) form.append('force_llm', 'true')
-  return jsonOrThrow(await fetch('/api/ocr/recognize', { method: 'POST', body: form }))
+  return jsonOrThrow(await authFetch('/api/ocr/recognize', { method: 'POST', body: form }))
 }
 
 export async function saveTransactions({ userId, transactions }) {
   return jsonOrThrow(
-    await fetch('/api/ocr/transactions', {
+    await authFetch('/api/ocr/transactions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, transactions }),
@@ -78,20 +80,20 @@ export async function saveTransactions({ userId, transactions }) {
 
 export async function listTransactions(userId, limit = 30) {
   const q = new URLSearchParams({ userId, limit: String(limit) })
-  return jsonOrThrow(await fetch(`/api/transactions?${q}`))
+  return jsonOrThrow(await authFetch(`/api/transactions?${q}`))
 }
 
 export async function deleteTransaction(userId, transactionId) {
   const q = new URLSearchParams({ userId })
   return jsonOrThrow(
-    await fetch(`/api/transactions/${encodeURIComponent(transactionId)}?${q}`, { method: 'DELETE' }),
+    await authFetch(`/api/transactions/${encodeURIComponent(transactionId)}?${q}`, { method: 'DELETE' }),
   )
 }
 
 // 기간 지출 요약 (사이드바 카드): rag_backend 구조화 조회 (startDate 포함, endDate 미포함)
 export async function spendingSummary({ userId, startDate, endDate }) {
   return jsonOrThrow(
-    await fetch('/api/transactions/query', {
+    await authFetch('/api/transactions/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId, mode: 'AGGREGATE', startDate, endDate, groupBy: 'CATEGORY', limit: 1 }),

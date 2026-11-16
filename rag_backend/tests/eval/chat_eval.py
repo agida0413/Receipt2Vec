@@ -5,7 +5,8 @@
 - 질문별 기대값(합계·이름·날짜)을 같은 데이터에서 코드로 계산해 답변을 채점한다.
 
 실행 (rag_backend 이미지에서, 호스트 네트워크로 localhost:3001 / 9200 접근)
-  MSYS_NO_PATHCONV=1 docker run --rm --network host -v "<rag_backend>:/app" -w /app \
+  EVAL_TOKEN=$(docker exec receipt2vec-auth-server python -m app.cli token --sub eval --ttl 7200)
+  MSYS_NO_PATHCONV=1 docker run --rm --network host -e EVAL_TOKEN -v "<rag_backend>:/app" -w /app \
       --entrypoint python rag-base-backend:latest tests/eval/chat_eval.py [--reset] [--only 5,6] [-v]
 """
 import argparse
@@ -22,6 +23,8 @@ from zoneinfo import ZoneInfo
 RAG = __import__("os").environ.get("EVAL_RAG_URL", "http://localhost:3001")
 OS = "http://localhost:9200"
 USER = "eval"
+# rag API 인증 토큰 (sub=eval): docker exec receipt2vec-auth-server python -m app.cli token --sub eval --ttl 7200
+TOKEN = __import__("os").environ.get("EVAL_TOKEN")
 TODAY = datetime.now(ZoneInfo("Asia/Seoul")).date()
 
 
@@ -419,7 +422,10 @@ CASES: List[Case] = [
 # ============================================================================
 def http(method: str, url: str, body=None):
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
-    r = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if TOKEN and url.startswith(RAG):
+        headers["Authorization"] = f"Bearer {TOKEN}"   # rag API 는 토큰 필수 (sub=eval 토큰)
+    r = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(r, timeout=120) as f:
         return f.read().decode()
 

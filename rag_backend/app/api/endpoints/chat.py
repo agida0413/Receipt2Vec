@@ -6,6 +6,7 @@ POST /stream   질문 → SSE 스트리밍 답변 (질문 전처리 → 거래 �
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+from app.core.auth import resolve_user_id
 from app.services.chat.schemas import ChatRequest
 from app.services.chat.service import chat_service
 
@@ -14,6 +15,7 @@ router = APIRouter()
 
 @router.post("/stream")
 async def chat_stream(request: ChatRequest):
+    request.userId = resolve_user_id(request.userId)   # 스트림 시작 전에 확정 (토큰 주인의 거래로만 답변)
     return StreamingResponse(
         chat_service.stream(request),
         media_type="text/event-stream",

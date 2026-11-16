@@ -1,0 +1,68 @@
+# =============================================================================
+# Receipt2Vec CI/CD 서버 (Jenkins) — 서비스용 docker-compose.yml 과 별개로 Jenkins 서버(EC2)에서 실행
+#
+#   cd dev-ops
+#   cp .env.example .env                  # 일반 설정 (주소·브랜치·이미지 저장소)
+#   ./scripts/init-secrets.sh             # dev-ops/secrets/ 시크릿 파일 생성 (git 제외)
+#   docker compose up -d --build          # http://<Jenkins 서버>:8080  (admin / secrets/jenkins_admin_password)
+#
+# 시크릿: dev-ops/secrets/* → 컨테이너의 /run/secrets/* → JCasC 가 Jenkins Credentials 로 등록
+# 빌드: 호스트 Docker 데몬(docker.sock)을 사용 → 이미지 레이어 캐시가 빌드 사이에 유지됨
+# =============================================================================
+name: receipt2vec-devops
+
+services:
+  jenkins:
+    build:
+      context: ./jenkins
+    image: receipt2vec-jenkins:2.580.2
+    container_name: receipt2vec-jenkins
+    restart: unless-stopped
+    ports:
+      - "${JENKINS_PORT:-8080}:8080"   # 보안그룹에서 관리자 IP 만 허용 권장
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Seoul
+    # docker.sock 사용 권한 (호스트 docker 그룹 GID, scripts/bootstrap-jenkins-host.sh 가 .env 에 기록)
+    group_add:
+      - "${DOCKER_GID:-999}"
+    volumes:
+      - jenkins-home:/var/jenkins_home            # 빌드 기록·작업공간·플러그인 (영속)
+      - ./casc:/var/jenkins_conf:ro               # JCasC 설정
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - jenkins_admin_password
+      - dockerhub_password
+      - rag_server_ssh_key
+      - aws_access_key_id
+      - aws_secret_access_key
+      - github_token
+      - slack_webhook_url
+      - app_root_env
+      - app_rag_backend_env
+      - app_ocr_backend_env
+      - app_auth_server_env
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/login >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+secrets:
+  jenkins_admin_password: { file: ./secrets/jenkins_admin_password }
+  dockerhub_password:     { file: ./secrets/dockerhub_password }
+  rag_server_ssh_key:     { file: ./secrets/rag_server_ssh_key }
+  aws_access_key_id:      { file: ./secrets/aws_access_key_id }
+  aws_secret_access_key:  { file: ./secrets/aws_secret_access_key }
+  github_token:           { file: ./secrets/github_token }
+  slack_webhook_url:      { file: ./secrets/slack_webhook_url }
+  app_root_env:           { file: ./secrets/app_root_env }
+  app_rag_backend_env:    { file: ./secrets/app_rag_backend_env }
+  app_ocr_backend_env:    { file: ./secrets/app_ocr_backend_env }
+  app_auth_server_env:    { file: ./secrets/app_auth_server_env }
+
+volumes:
+  jenkins-home:
+    name: receipt2vec-devops_jenkins-home

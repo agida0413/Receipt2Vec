@@ -479,3 +479,40 @@ button:disabled { cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* ---------------------------------------------------------------- 로그인 */
+.login-page {
+  min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px;
+  background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--brand) 14%, transparent), transparent), var(--bg);
+}
+.login-card {
+  width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 20px;
+  padding: 36px 28px 28px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 20px; box-shadow: 0 20px 60px rgba(15, 18, 30, .08);
+}
+.login-brand { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.login-brand h1 { margin: 6px 0 0; font-size: 24px; letter-spacing: -.02em; }
+.login-brand p { margin: 0; color: var(--text-sub); font-size: 14px; line-height: 1.55; }
+.login-buttons { display: flex; flex-direction: column; gap: 10px; }
+.social-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px; height: 48px; border-radius: 12px;
+  font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid transparent; position: relative;
+  transition: filter .15s, transform .05s;
+}
+.social-btn:hover { filter: brightness(.96); }
+.social-btn:active { transform: translateY(1px); }
+.social-btn.pending { opacity: .7; pointer-events: none; }
+.social-mark { position: absolute; left: 16px; display: grid; place-items: center; }
+.social-btn.google { background: #fff; color: #1f1f1f; border-color: #dadce0; }
+.social-btn.naver { background: #03c75a; color: #fff; }
+.social-btn.kakao { background: #fee500; color: rgba(0, 0, 0, .85); }
+.login-note { margin: 0; text-align: center; font-size: 12px; color: var(--text-faint); line-height: 1.5; }
+.boot-screen { min-height: 100dvh; display: grid; place-items: center; color: var(--text-faint); }
+
+/* 사이드바 프로필 (로그인 사용자) */
+.profile-user { display: flex; align-items: center; gap: 10px; width: 100%; }
+.profile-avatar.img { background-size: cover; background-position: center; color: transparent; }
+.profile-user .profile-name { flex: 1; min-width: 0; }
+.profile-user .profile-name b, .profile-user .profile-name span {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

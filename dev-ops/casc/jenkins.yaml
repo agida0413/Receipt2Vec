@@ -1,0 +1,129 @@
+# =============================================================================
+# Jenkins 설정 코드화 (JCasC) — 기동 시 자동 적용
+#
+# 시크릿: ${이름} 은 /run/secrets/<이름> (docker compose secrets, dev-ops/secrets/ 의 파일)에서 읽힌다.
+#         ${readFileBase64:...} 는 파일 내용을 그대로 '비밀 파일' 자격증명으로 등록.
+#         → 키 값은 git·Jenkinsfile·빌드 로그 어디에도 남지 않고 Jenkins Credentials 에만 존재
+# 일반 설정: ${GIT_REPO_URL} 등은 dev-ops/.env (docker compose 환경변수)
+# =============================================================================
+jenkins:
+  systemMessage: "Receipt2Vec CI/CD — 설정은 dev-ops/casc/jenkins.yaml 에서 관리 (UI 변경은 재시작 시 초기화)"
+  numExecutors: 2
+  mode: NORMAL
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID:-admin}"
+          password: "${jenkins_admin_password}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: RAG_HOST
+            value: "${RAG_HOST}"
+          - key: RAG_SSH_USER
+            value: "${RAG_SSH_USER:-ec2-user}"
+          - key: IMAGE_REPO
+            value: "${IMAGE_REPO}"
+          - key: PUBLIC_BASE_URL
+            value: "${PUBLIC_BASE_URL}"
+
+unclassified:
+  location:
+    url: "${JENKINS_URL}"
+  timestamper:
+    allPipelines: true
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # Docker Hub (이미지 푸시·배포 서버 pull)
+          - usernamePassword:
+              scope: GLOBAL
+              id: dockerhub
+              username: "${DOCKERHUB_USERNAME}"
+              password: "${dockerhub_password}"
+              description: "Docker Hub 계정 (가능하면 비밀번호 대신 Access Token)"
+          # RAG 서버 SSH 접속 키 (EC2 키페어 .pem)
+          - basicSSHUserPrivateKey:
+              scope: GLOBAL
+              id: rag-server-ssh
+              username: "${RAG_SSH_USER:-ec2-user}"
+              description: "RAG 서버 SSH 키"
+              privateKeySource:
+                directEntry:
+                  privateKey: "${readFile:/run/secrets/rag_server_ssh_key}"
+          # AWS IAM 키 (보관용. 현재 파이프라인은 Docker Hub 를 써서 사용하지 않음)
+          - usernamePassword:
+              scope: GLOBAL
+              id: aws-credentials
+              username: "${aws_access_key_id}"
+              password: "${aws_secret_access_key}"
+              description: "AWS IAM Access Key (username=Access Key ID, password=Secret)"
+          # GitHub (비공개 저장소일 때만 필요, 토큰이 비어 있으면 공개 저장소로 체크아웃)
+          - usernamePassword:
+              scope: GLOBAL
+              id: github
+              username: "${GITHUB_USERNAME:-git}"
+              password: "${github_token}"
+              description: "GitHub Personal Access Token (repo 읽기)"
+          # Slack 배포 알림 웹훅
+          - string:
+              scope: GLOBAL
+              id: slack-webhook
+              secret: "${slack_webhook_url}"
+              description: "Slack Incoming Webhook (배포 결과 알림)"
+          # 운영 서버에 배포할 환경 파일 (앱 시크릿: Gemini·OAuth 키, DB 비밀번호 …)
+          - file:
+              scope: GLOBAL
+              id: app-root-env
+              fileName: root.env
+              secretBytes: "${readFileBase64:/run/secrets/app_root_env}"
+              description: "운영 루트 .env (MySQL/Redis 비밀번호, 공개 주소, Slack)"
+          - file:
+              scope: GLOBAL
+              id: app-rag-backend-env
+              fileName: rag_backend.env
+              secretBytes: "${readFileBase64:/run/secrets/app_rag_backend_env}"
+              description: "운영 rag_backend/.env (Gemini 키 등)"
+          - file:
+              scope: GLOBAL
+              id: app-ocr-backend-env
+              fileName: ocr_backend.env
+              secretBytes: "${readFileBase64:/run/secrets/app_ocr_backend_env}"
+              description: "운영 ocr_backend/.env"
+          - file:
+              scope: GLOBAL
+              id: app-auth-server-env
+              fileName: auth_server.env
+              secretBytes: "${readFileBase64:/run/secrets/app_auth_server_env}"
+              description: "운영 auth_server/.env (OAuth client id/secret)"
+
+jobs:
+  # 빌드·배포 파이프라인 (Jenkinsfile 은 저장소의 dev-ops/Jenkinsfile)
+  - script: >
+      pipelineJob('receipt2vec-deploy') {
+        description('Receipt2Vec 빌드 → 테스트 → Docker Hub 푸시 → RAG 서버 배포 (dev-ops/Jenkinsfile)')
+        logRotator { numToKeep(30) }
+        properties { disableConcurrentBuilds() }
+        triggers { scm('${POLL_SCM:-H/5 * * * *}') }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${GIT_REPO_URL}')
+                  if ('${GIT_CREDENTIALS_ID:-}') { credentials('${GIT_CREDENTIALS_ID:-}') }
+                }
+                branch('${GIT_BRANCH:-master}')
+              }
+            }
+            scriptPath('dev-ops/Jenkinsfile')
+            lightweight(false)
+          }
+        }
+      }

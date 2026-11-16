@@ -8,6 +8,7 @@ if str(_backend_root) not in sys.path:
 import logging
 
 from app.core.logging_setup import RequestLoggingMiddleware, setup_logging
+from app.core.auth import AuthMiddleware
 
 import uvicorn
 from fastapi import FastAPI
@@ -40,6 +41,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 토큰 검증 (/api/* , 헬스체크 제외)
+app.add_middleware(AuthMiddleware)
 app.add_middleware(RequestLoggingMiddleware, service="ocr-backend")
 
 

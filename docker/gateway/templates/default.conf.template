@@ -1,0 +1,230 @@
+# =============================================================================
+# Receipt2Vec API 게이트웨이 (단일 진입점: 라우팅 + 로드밸런싱)
+#
+#   브라우저 ──▶ gateway (이 파일) ──┬─ /                          → frontend      (화면, 정적 파일)
+#                                    ├─ /api/ocr/*                 → ocr-backend   (OCR)
+#                                    ├─ /api/auth/*, /oauth2/*,
+#                                    │  /login/oauth2/*, JWKS      → auth-server   (인증)
+#                                    └─ /api/*                     → backend       (챗봇·거래, rag)
+#
+# 로드밸런싱
+#   - upstream 의 `resolve` : Docker DNS 를 주기적으로 다시 조회 → 같은 서비스의 인스턴스가 늘거나
+#     재시작돼 IP 가 바뀌어도 자동 반영 (nginx 1.27.3+). 인스턴스 추가는 docker-compose.yml 주석 참고
+#   - 실패한 인스턴스는 max_fails/fail_timeout 동안 제외 (passive health check)
+#   - 챗봇(SSE)은 연결이 길어 least_conn, 나머지는 round-robin
+#
+# 배포 시: SERVER_NAME=도메인 으로 바꾸고 443(TLS) 블록을 켜면 도메인 하나로 운영 (맨 아래 참고)
+# ${VAR} 는 컨테이너 시작 시 환경변수로 치환됨 (정의된 변수만 치환되므로 nginx 의 $host 등은 그대로)
+# =============================================================================
+
+# Docker 내장 DNS (upstream resolve 와 동적 proxy_pass 에 사용)
+resolver 127.0.0.11 valid=10s ipv6=off;
+resolver_timeout 5s;
+
+# 요청 ID: 클라이언트가 보낸 X-Request-ID 가 있으면 그대로, 없으면 생성 → 모든 백엔드까지 전달
+map $http_x_request_id $req_id {
+    default $http_x_request_id;
+    ""      $request_id;
+}
+
+# 상태 코드 → 로그 레벨 (Grafana 에서 5xx 빨강, 4xx 노랑)
+map $status $log_level {
+    ~^5     ERROR;
+    ~^4     WARNING;
+    default INFO;
+}
+
+# upstream=실제 처리한 인스턴스 주소 → 로드밸런싱 분산 확인 가능
+log_format gateway '$time_iso8601 | $log_level | rid=$req_id | nginx | '
+                   'method=$request_method path=$uri status=$status ms=$request_time bytes=$body_bytes_sent '
+                   'route=$route upstream=$upstream_addr upstream_status=$upstream_status '
+                   'upstream_ms=$upstream_response_time client=$remote_addr ua="$http_user_agent"';
+
+# 남용 방지: 로그인·토큰 엔드포인트는 IP 당 초당 10회 (순간 20회까지 허용)
+limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/s;
+limit_req_status 429;
+
+# ------------------------------------------------------------------------------ upstreams
+upstream frontend_pool {
+    zone frontend_pool 64k;
+    server frontend:80 resolve max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+upstream rag_pool {
+    zone rag_pool 64k;
+    least_conn;                       # SSE 스트림처럼 긴 연결이 한 인스턴스에 몰리지 않게
+    server backend:3001 resolve max_fails=3 fail_timeout=15s;
+    keepalive 32;
+}
+
+upstream ocr_pool {
+    zone ocr_pool 64k;
+    least_conn;                       # OCR 은 요청당 수 초 (CPU 사용) → 처리 중인 요청이 적은 쪽으로
+    server ocr-backend:3002 resolve max_fails=3 fail_timeout=15s;
+    keepalive 16;
+}
+
+upstream auth_pool {
+    zone auth_pool 64k;
+    server auth-server:3003 resolve max_fails=3 fail_timeout=10s;
+    keepalive 16;
+}
+
+# ------------------------------------------------------------------------------ server
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+
+    access_log /dev/stdout gateway;
+    client_max_body_size 20m;          # 영수증 사진 업로드
+    client_body_buffer_size 20m;
+
+    # 공통 프록시 설정 (keepalive 재사용을 위해 HTTP/1.1 + 빈 Connection)
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Request-ID $req_id;
+    proxy_connect_timeout 2s;          # 내부망이라 연결은 즉시 → 죽은 인스턴스는 2초 안에 포기하고 다른 인스턴스로
+    # 연결 실패·타임아웃이면 다른 인스턴스로 재시도 (POST 같은 비멱등 요청은 nginx 가 재시도하지 않음)
+    proxy_next_upstream error timeout http_502 http_503 http_504;
+    proxy_next_upstream_tries 2;
+
+    # 백엔드가 붙인 X-Request-ID 는 숨기고 게이트웨이 값 하나만 (값은 같음, 헤더 중복 방지)
+    proxy_hide_header X-Request-ID;
+
+    # 보안 헤더
+    add_header X-Request-ID $req_id always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    gzip on;
+    gzip_types application/json text/css application/javascript image/svg+xml;   # text/event-stream 제외 (SSE)
+    gzip_min_length 1024;
+
+    # 게이트웨이 자체 상태 (컨테이너 healthcheck)
+    location = /gateway/health {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok","service":"gateway"}';
+    }
+
+    # 인증: 소셜 로그인 시작·콜백, 토큰, JWKS → auth-server
+    location ~ ^/(oauth2/|login/oauth2/|api/auth/|\.well-known/jwks\.json) {
+        set $route auth;
+        limit_req zone=auth_limit burst=20 nodelay;
+        # location 에 add_header 가 있으면 server 의 add_header 가 상속되지 않음 → 모두 다시 지정
+        add_header Cache-Control "no-store" always;
+        add_header X-Request-ID $req_id always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options SAMEORIGIN always;
+        add_header Referrer-Policy strict-origin-when-cross-origin always;
+        proxy_pass http://auth_pool;
+    }
+
+    # ------------------------------------------------------------------ 인증 검사 (auth_request)
+    # 로그인·로그아웃·토큰 갱신(위 auth location)과 헬스체크를 뺀 모든 API 는 백엔드로 보내기 전에
+    # auth-server 에 토큰을 확인한다 (서명·만료 + 로그아웃/세션 종료 여부). 통과 못 하면 백엔드까지 가지 않음.
+    # 각 백엔드도 JWKS 로 서명을 다시 검증하고 userId 가 토큰 주인인지 확인한다 (포트 직접 호출 대비).
+    location = /_auth {
+        internal;
+        proxy_pass http://auth_pool/api/auth/verify;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        # location 에서 proxy_set_header 를 쓰면 server 의 설정이 상속되지 않음 → 필요한 것 다시 지정
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Request-ID $req_id;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_read_timeout 5s;
+    }
+
+    # 인증 실패 응답을 JSON 으로 (nginx 기본 HTML 대신, 프론트가 code 로 판단)
+    location @unauthorized {
+        default_type application/json;
+        add_header WWW-Authenticate "Bearer" always;
+        add_header X-Request-ID $req_id always;
+        return 401 '{"detail":{"code":"$auth_error","message":"로그인이 필요해요"}}';
+    }
+    location @auth_unavailable {
+        default_type application/json;
+        add_header X-Request-ID $req_id always;
+        return 503 '{"detail":{"code":"auth_unavailable","message":"인증 서버에 연결할 수 없어요"}}';
+    }
+
+    # 헬스체크는 인증 없이 (모니터링용)
+    location /api/health {
+        set $route rag-health;
+        proxy_pass http://rag_pool;
+    }
+
+    # OCR: 사진 인식(수 초~수십 초), 확인, 저장 → ocr-backend
+    location /api/ocr/ {
+        set $route ocr;
+        auth_request /_auth;
+        auth_request_set $auth_error $upstream_http_x_auth_error;
+        error_page 401 = @unauthorized;
+        error_page 500 = @auth_unavailable;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_pass http://ocr_pool;
+    }
+
+    # 챗봇 SSE: 버퍼링하면 글자가 한꺼번에 나옴 → 끔
+    location = /api/chat/stream {
+        set $route rag-sse;
+        auth_request /_auth;
+        auth_request_set $auth_error $upstream_http_x_auth_error;
+        error_page 401 = @unauthorized;
+        error_page 500 = @auth_unavailable;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 300s;
+        proxy_next_upstream off;       # 스트림 도중 재시도하면 답변이 중복됨
+        proxy_pass http://rag_pool;
+    }
+
+    # 거래 조회·삭제 등 나머지 API → backend(rag)
+    location /api/ {
+        set $route rag;
+        auth_request /_auth;
+        auth_request_set $auth_error $upstream_http_x_auth_error;
+        error_page 401 = @unauthorized;
+        error_page 500 = @auth_unavailable;
+        proxy_read_timeout 120s;
+        proxy_pass http://rag_pool;
+    }
+
+    # 화면 (React 빌드 결과, frontend 컨테이너의 nginx 가 정적 파일 제공)
+    location / {
+        set $route web;
+        # 정적 파일은 즉시 응답 → 멈춘 인스턴스는 5초 만에 포기하고 다른 인스턴스로 (기본 60초)
+        proxy_read_timeout 5s;
+        proxy_pass http://frontend_pool;
+    }
+}
+
+# ------------------------------------------------------------------------------ 운영 배포 (도메인 + HTTPS)
+# 1) DNS: 도메인 A 레코드 → 서버 IP
+# 2) 인증서: certbot 등으로 발급 후 ./docker/gateway/certs 에 fullchain.pem / privkey.pem
+# 3) docker-compose: gateway 에 "443:443" 포트·certs 볼륨 추가, SERVER_NAME=도메인,
+#    PUBLIC_BASE_URL=https://도메인, auth-server 에 COOKIE_SECURE=true
+# 4) 각 OAuth 콘솔 Redirect URI 를 https://도메인/login/oauth2/code/{google|naver|kakao} 로 등록
+# 5) 아래 블록 주석 해제 + 위 server 의 listen 80 은 HTTPS 리다이렉트만 남김
+#
+# server {
+#     listen 443 ssl;
+#     http2 on;
+#     server_name ${SERVER_NAME};
+#     ssl_certificate     /etc/nginx/certs/fullchain.pem;
+#     ssl_certificate_key /etc/nginx/certs/privkey.pem;
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     add_header Strict-Transport-Security "max-age=31536000" always;
+#     ... (위 server 의 location 들을 그대로)
+# }

@@ -1,0 +1,14 @@
+# Jenkins 플러그인 (jenkins-plugin-cli 가 Jenkins 코어 버전에 맞는 버전으로 설치)
+configuration-as-code
+job-dsl
+workflow-aggregator
+pipeline-stage-view
+git
+credentials
+credentials-binding
+plain-credentials
+ssh-credentials
+ssh-agent
+timestamper
+ws-cleanup
+ansicolor

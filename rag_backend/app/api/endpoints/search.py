@@ -1,7 +1,8 @@
 """
 검색 API 엔드포인트
 """
-from fastapi import APIRouter, HTTPException,status
+from fastapi import APIRouter, Depends, HTTPException, status
+from app.core.auth import require_admin
 from app.core.config import settings
 from app.models import (
     SearchRequest, SearchResponse,
@@ -68,7 +69,7 @@ async def search_items(request: SearchRequest):
 #================================================================
 # 인덱스 생성 
 #================================================================
-@router.post("/index", response_model=CreateIndexResponse)
+@router.post("/index", response_model=CreateIndexResponse, dependencies=[Depends(require_admin)])
 async def create_index(request: CreateIndexRequest):
     """
     인덱스 생성 API (스키마는 활성 도메인이 설계)
@@ -105,7 +106,7 @@ async def create_index(request: CreateIndexRequest):
 #================================================================
 # 데이터적재 (인덱스는 사전에 POST /index 로 생성되어 있어야 함)
 #================================================================
-@router.post("/load", response_model=LoadDataResponse)
+@router.post("/load", response_model=LoadDataResponse, dependencies=[Depends(require_admin)])
 async def load_data(request: LoadDataRequest):
     """
     데이터 적재 API (인덱스 생성은 POST /index 로 분리됨)
@@ -142,7 +143,7 @@ async def load_data(request: LoadDataRequest):
 #================================================================
 # 하이브리드 쿼리구성을 위해 검색파이프라인생성
 #================================================================
-@router.post("/search_pipeline")
+@router.post("/search_pipeline", dependencies=[Depends(require_admin)])
 async def create_search_pipeline(request:CreateSearchPipelineRequest):
     search_service.create_search_pipeline(request.search_pipeline_name,request.vector_weight,request.bm25_weight)
     return {
@@ -156,13 +157,13 @@ async def create_search_pipeline(request:CreateSearchPipelineRequest):
 #================================================================
 # 부가API(인덱스통계,삭제)
 #================================================================
-@router.get("/index/stats")
+@router.get("/index/stats", dependencies=[Depends(require_admin)])
 async def get_index_stats(index_name: str = None):
     """인덱스 통계 조회"""
     return index_service.get_index_stats(index_name)
 
 
-@router.delete("/index")
+@router.delete("/index", dependencies=[Depends(require_admin)])
 async def delete_index(index_name: str = None):
     """인덱스 삭제"""
     idx = index_name or settings.opensearch.index_name

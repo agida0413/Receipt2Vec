@@ -9,6 +9,7 @@ from typing import Any, List, Optional, Tuple
 import httpx
 
 from app.core.config import settings
+from app.core.auth import forward_auth_headers
 from app.core.logging_setup import current_request_id
 from app.domain.transaction import Transaction
 
@@ -36,6 +37,7 @@ class TransactionStoreClient:
         try:
             async with httpx.AsyncClient(timeout=settings.store.timeout_sec, transport=self._transport) as c:
                 headers = {"X-Request-ID": rid} if (rid := current_request_id()) else {}
+                headers.update(forward_auth_headers())   # 사용자 토큰 전달 → rag 가 같은 사용자로 검증
                 res = await c.post(self._url, json=body, headers=headers)
         except httpx.HTTPError as e:
             raise StoreUnavailableError(f"거래 저장소({self._url}) 연결 실패: {type(e).__name__}") from e
