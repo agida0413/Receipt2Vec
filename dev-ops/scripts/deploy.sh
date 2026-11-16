@@ -23,8 +23,12 @@ cp docker-compose.yml dev-ops/deploy/docker-compose.prod.yml dev-ops/deploy/remo
 cp -r docker/gateway docker/logging "$B/docker/"
 cp auth_server/app/db/schema.sql "$B/auth_server/app/db/"
 if [ -d rag_backend/app/test ]; then cp -r rag_backend/app/test "$B/rag_backend/app/"; else mkdir -p "$B/rag_backend/app/test"; fi
+# 컨테이너에 마운트되는 설정 파일은 컨테이너 안의 다른 사용자도 읽을 수 있어야 함
+# (예: MySQL 은 mysql 사용자(uid 999)로 schema.sql 을 읽음 → 600 이면 초기화 실패)
+# 서버의 ~/receipt2vec 폴더 자체가 700 이라 다른 계정은 접근 불가
+chmod -R u=rwX,go=rX "$B"
 
-# 환경 파일 (권한 600). 이미지 저장소·태그를 루트 .env 에 추가
+# 환경 파일 (비밀값, 권한 600). 이미지 저장소·태그를 루트 .env 에 추가
 install -m 600 "$ROOT_ENV" "$B/.env"
 printf '\n# Jenkins 배포 (빌드 #%s, 커밋 %s)\nIMAGE_REPO=%s\nIMAGE_TAG=%s\n' \
   "${BUILD_NUMBER:-?}" "${GIT_SHA:-?}" "$IMAGE_REPO" "$TAG" >> "$B/.env"
@@ -34,7 +38,8 @@ install -m 600 "$AUTH_ENV" "$B/auth_server/.env"
 
 echo "[deploy] ${TARGET}:~/receipt2vec 로 전송 (태그 ${TAG})"
 ssh "${SSH_OPTS[@]}" "$TARGET" 'mkdir -p ~/receipt2vec && chmod 700 ~/receipt2vec'
-rsync -az --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= -e "ssh ${SSH_OPTS[*]}" "$B/" "$TARGET:receipt2vec/"
+# -a 로 위에서 정한 권한을 그대로 유지 (설정 644, .env 600)
+rsync -az -e "ssh ${SSH_OPTS[*]}" "$B/" "$TARGET:receipt2vec/"
 # Docker Hub 비밀번호는 표준입력으로만 전달 (명령줄·로그에 남지 않음)
 printf '%s' "$DH_PASS" | ssh "${SSH_OPTS[@]}" "$TARGET" "bash ~/receipt2vec/remote-deploy.sh '$DH_USER'"
 rm -rf "$B"
