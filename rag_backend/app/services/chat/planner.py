@@ -13,7 +13,7 @@
 import json
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional, Tuple
 
 from app.core.config import settings
@@ -23,7 +23,7 @@ from app.services.chat.schemas import (
     QueryPlan, TransactionStatus,
 )
 from app.services.transactions.enrich import (
-    BRAND_ALIASES, CATEGORY_NAMES, ITEM_CATEGORIES, is_item_word, strip_suffix, to_category, to_item_category,
+    BRAND_ALIASES, CATEGORY_NAMES, ITEM_CATEGORIES, MERCHANT_TYPES, brand_alias, is_item_word, strip_suffix, to_category, to_item_category,
 )
 from app.services.transactions.schemas import UserVocabulary
 
@@ -48,10 +48,22 @@ _MONTH = re.compile(r"(?<!\d)(\d{1,2})\s*월(?!\s*\d{1,2}\s*일)")
 _ABS_DATE = re.compile(r"(20\d{2})[.\-/년]\s*(\d{1,2})[.\-/월]\s*(\d{1,2})")
 _MONTH_DAY = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일")
 
+# '11월 2일부터 8일까지', '11월 2일~11월 8일'
+_DATE_RANGE = re.compile(r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일?\s*(?:부터|~|-|에서)\s*(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*일")
+# '최근 일주일', '한 달 동안', '보름간' → 최근 N일
+_SPAN_WORDS = [(r"일주일|한\s*주(?:일)?\s*(?:동안|간)", 7), (r"보름", 15),
+               (r"한\s*달\s*(?:동안|간|새)|최근\s*한\s*달|지난\s*한\s*달", 30)]
+# 비교 표현 ('지난달이랑 이번달 중에', '지난주 대비') — 없으면 두 날짜는 합친 구간 ('어제 오늘 합쳐서')
+_COMPARE_WORDS = re.compile(r"비교|대비|중에|중\s|보다|차이|늘었|줄었|늘어|줄어|증가|감소|vs|각각|어느\s*쪽|더\s*(많이|적게|썼)", re.I)
+_MIN = re.compile(r"(제일|가장)\s*(싼|저렴|적게|적은|작은|조금)|최저|최소")
+_SHARE = re.compile(r"비중|비율|퍼센트|몇\s*%|몇\s*프로|차지")
+_UNIT_PRICE = re.compile(r"(한|1)\s*(갑|개|병|잔|캔|봉지|인분|팩)\s*(에|당|짜리)|개당|갑당|단가")
+_TOP_N = re.compile(r"(?:top|탑|상위)\s*(\d{1,2})|(\d{1,2})\s*(?:군데|곳|위까지)", re.I)
+
 _COUNT = re.compile(r"몇\s*(번|건|회)|횟수|건수")
 _AVG = re.compile(r"평균")
-_MAX = re.compile(r"(제일|가장)\s*(비싼|큰)|최고\s*금액|최대")
-_SUM = re.compile(r"얼마|총|합계|합산|지출|썼|쓴\s*돈|사용\s*금액|사용액|소비|씀|쓴\s*금액")
+_MAX = re.compile(r"(제일|가장)\s*(비싼|큰)|최고\s*금액|최대|한\s*번에.{0,6}(제일|가장)\s*많이")
+_SUM = re.compile(r"얼마|총|합계|합산|지출|썼|썻|쓴\s*돈|사용\s*금액|사용액|소비|씀|쓴\s*금액")
 _SUM_MONEY = re.compile(r"얼마|돈|금액|썼|쓴|지출|비용|값")
 # '가장 최근 거래', '마지막으로 간 게' → 최신순 1건 ('최근 30일' 같은 기간 표현은 제외)
 _RECENT_ONE = re.compile(r"(가장|제일)?\s*(최근|마지막)(으로|에)?\s*(거래|결제|간|산|쓴|먹은|이용|방문|구매|한)")
@@ -68,7 +80,7 @@ _GROUP_ITEM = re.compile(r"(뭐|무엇|뭘|무슨|어떤\s*(거|것|걸|제품|�
 _QTY = re.compile(r"몇\s*(갑|개|병|잔|캔|봉지|인분|번\s*샀)")
 _GROUP_DAY = re.compile(r"일\s*별|날짜\s*별|하루\s*하루")
 # '제일 많이 쓴 날' → 날짜별 금액 순위
-_TOP_DAY = re.compile(r"(제일|가장)\s*많이\s*(쓴|쓴\s*돈|지출한|결제한)\s*날|어느\s*날.{0,6}(제일|가장)\s*많이")
+_TOP_DAY = re.compile(r"(제일|가장)\s*(많이|적게)\s*(쓴|쓴\s*돈|지출한|결제한)\s*날|어느\s*날.{0,6}(제일|가장)\s*(많이|적게)")
 _HOUR_BEFORE = re.compile(r"(\d{1,2})\s*시\s*(전|이전|before)")
 _HOUR_AFTER = re.compile(r"(\d{1,2})\s*시\s*(이후|후|넘어|넘어서|부터)")
 _GROUP_MONTH = re.compile(r"월\s*별|달\s*별|매달")
@@ -86,7 +98,7 @@ _MAX_AMOUNT = re.compile(_AMOUNT + r"\s*(이하|미만|아래|안\s*되는|까�
 _WEEKDAYS = [(r"주말", [6, 7]), (r"평일", [1, 2, 3, 4, 5])] + [
     (rf"{d}요일", [i + 1]) for i, d in enumerate("월화수목금토일")]
 _HOURS = [(r"새벽", 0, 5), (r"아침|오전", 6, 11), (r"점심", 11, 14), (r"오후", 12, 17), (r"저녁", 17, 21),
-          (r"밤|야간|심야", 21, 2)]
+          (r"밤|야간|심야|야식", 21, 2)]
 
 _METHOD_WORDS = [
     (r"현금", PaymentMethod.CASH), (r"페이\s*머니|토스\s*머니|머니", PaymentMethod.PAY_MONEY),
@@ -106,7 +118,7 @@ _CARD_PATTERNS = [
 ]
 
 # 검색어 추출 시 지울 표현 (기간/의도/결제수단/금액/요일/시간대 단어)
-_STRIP_PATTERNS = [p for p, _, _ in _RELATIVE] + [
+_STRIP_PATTERNS = [_DATE_RANGE.pattern] + [p for p, _ in _SPAN_WORDS] + [p for p, _, _ in _RELATIVE] + [
     _N_DAYS_AGO.pattern, _LAST_N_DAYS.pattern, _LAST_N_WEEKS.pattern, _YEAR_MONTH.pattern,
     _ABS_DATE.pattern, _MONTH_DAY.pattern, _MONTH.pattern, _MIN_AMOUNT.pattern, _MAX_AMOUNT.pattern,
     r"카카오\s*페이|토스\s*페이|네이버\s*페이|페이코|삼성\s*페이|애플\s*페이|토스|카카오",
@@ -122,6 +134,8 @@ _STOPWORDS = set("""
 있는 잇는 있던 위치한 근처 쪽 거기 여기 뭘 업종별 업종 카테고리 종류 요일별 요일 시간 이상 이하 미만 초과
 먹었던 먹은 먹었어 먹었지 사먹은 사먹었어 폈지 폈어 피운 핀 마신 마셨어 마셨지 시킨 시켜먹은 갔지 갔어 간 갔던 이름
 몇갑 갑 개 병 잔 날 때 적 언제 어디를 무엇을 탄 받은 받았어 나온 나왔어 등록 등록했어
+일주일 보름 합쳐서 합쳐 합해서 합하면 같이 패턴 분석 분석해줘 분석해 비중 비율 퍼센트 프로 각각 적게 싼 저렴한 차지 단가 개당 갑당
+중에 중 둘 어느 더 늘었어 줄었어 늘었나 줄었나 어때 전부다 한번에 번에
 """.split())
 _JOSA = re.compile(r"(에서|에게|으로|로|에|을|를|이|가|은|는|의|도|만|랑|이랑|하고|과|와|까지|부터|이야|야|요)$")
 
@@ -147,23 +161,50 @@ def _won(num: Optional[str], unit: Optional[str]) -> Optional[int]:
     return n * {"만": 10000, "천": 1000}.get(unit or "", 1)
 
 
+def _month_day(mo: int, dd: int, base: Optional[date] = None) -> Optional[date]:
+    """연도 없는 'M월 D일' → 가장 최근의 그 날짜 (미래면 작년)"""
+    from app.services.chat.period import today
+    t = base or today()
+    try:
+        return date(t.year if (mo, dd) <= (t.month, t.day) else t.year - 1, mo, dd)
+    except ValueError:
+        return None
+
+
+def _absolute(p: Period, start: date, end: date) -> Period:
+    return p.model_copy(update={"kind": PeriodKind.ABSOLUTE, "startDate": start.isoformat(),
+                                "endDate": end.isoformat()})
+
+
+def _relatives(text: str) -> List[Tuple[int, PeriodUnit, int]]:
+    """질문에 나온 상대 기간 전부 (위치, 단위, offset) — 중복 제거, 등장 순"""
+    found: List[Tuple[int, PeriodUnit, int]] = []
+    for pattern, unit, off in _RELATIVE:
+        for m in re.finditer(pattern, text):
+            if not any(u == unit and o == off for _, u, o in found):
+                found.append((m.start(), unit, off))
+    return sorted(found)
+
+
 def _period_from_text(text: str) -> Period:
     p = Period.none()
+    m = _DATE_RANGE.search(text)
+    if m:
+        s = _month_day(int(m.group(1)), int(m.group(2)))
+        e = _month_day(int(m.group(3) or m.group(1)), int(m.group(4)))
+        if s and e:
+            if s > e:  # '12월 28일부터 1월 3일까지' → 시작은 작년
+                s = s.replace(year=s.year - 1)
+            return _absolute(p, s, e)
     m = _ABS_DATE.search(text)
     if m:
         d = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         return p.model_copy(update={"kind": PeriodKind.ABSOLUTE, "startDate": d, "endDate": d})
     m = _MONTH_DAY.search(text)
     if m:
-        from app.services.chat.period import today
-        t = today()
-        mo, dd = int(m.group(1)), int(m.group(2))
-        y = t.year if (mo, dd) <= (t.month, t.day) else t.year - 1
-        try:
-            d = date(y, mo, dd).isoformat()
-            return p.model_copy(update={"kind": PeriodKind.ABSOLUTE, "startDate": d, "endDate": d})
-        except ValueError:
-            pass
+        d = _month_day(int(m.group(1)), int(m.group(2)))
+        if d:
+            return _absolute(p, d, d)
     m = _N_DAYS_AGO.search(text)
     if m:
         return p.model_copy(update={"kind": PeriodKind.RELATIVE, "unit": PeriodUnit.DAY,
@@ -174,6 +215,15 @@ def _period_from_text(text: str) -> Period:
     m = _LAST_N_WEEKS.search(text)
     if m:
         return p.model_copy(update={"kind": PeriodKind.LAST_N_DAYS, "days": int(m.group(1)) * 7})
+    for pattern, days in _SPAN_WORDS:
+        if re.search(pattern, text):
+            return p.model_copy(update={"kind": PeriodKind.LAST_N_DAYS, "days": days})
+    days = [o for _, u, o in _relatives(text) if u == PeriodUnit.DAY]
+    if len(days) >= 2 and not _COMPARE_WORDS.search(text):
+        # '어제 오늘 합쳐서' → 두 날짜를 포함하는 구간
+        from app.services.chat.period import today
+        t = today()
+        return _absolute(p, t + timedelta(days=min(days)), t + timedelta(days=max(days)))
     for pattern, unit, off in _RELATIVE:
         if re.search(pattern, text):
             return p.model_copy(update={"kind": PeriodKind.RELATIVE, "unit": unit, "offset": off})
@@ -185,6 +235,52 @@ def _period_from_text(text: str) -> Period:
     if m and 1 <= int(m.group(1)) <= 12:
         return p.model_copy(update={"kind": PeriodKind.MONTH_OF_YEAR, "month": int(m.group(1))})
     return p
+
+
+def compare_periods(text: str) -> Optional[Tuple[Period, Period]]:
+    """
+    두 기간 비교 → (기준 기간, 비교 기간). 기준은 더 최근 기간.
+      '지난달이랑 이번달 중에 언제 더' → (이번 달, 지난달)
+      '지난주 대비 얼마나 늘었어'        → (이번 주, 지난주)   (기준 기간을 생략한 경우)
+    """
+    if not _COMPARE_WORDS.search(text):
+        return None
+    none = Period.none()
+    found = [none.model_copy(update={"kind": PeriodKind.RELATIVE, "unit": u, "offset": o})
+             for _, u, o in _relatives(text)]
+    found += [none.model_copy(update={"kind": PeriodKind.MONTH_OF_YEAR, "month": int(m.group(1))})
+              for m in _MONTH.finditer(text) if 1 <= int(m.group(1)) <= 12]
+    if len(found) == 1 and re.search(r"대비|보다|비교", text) and found[0].kind == PeriodKind.RELATIVE \
+            and (found[0].offset or 0) < 0:
+        found.insert(0, found[0].model_copy(update={"offset": 0}))
+    if len(found) < 2:
+        return None
+    from app.services.chat.period import resolve
+    a, b = found[0], found[1]
+    ra, rb = resolve(a), resolve(b)
+    if not ra or not rb or ra.start == rb.start:
+        return None
+    return (a, b) if ra.start > rb.start else (b, a)
+
+
+_COMPARE_TERMS = re.compile(
+    r"([가-힣A-Za-z0-9]+?)\s*(?:이랑|랑|하고|와|과|\s+vs\.?)\s*([가-힣A-Za-z0-9]+?)\s*"
+    r"(?:중에|중|각각|둘|비교|어디|뭐|어느|에\s*각각|에서\s*각각)", re.I)
+
+
+def compare_terms(text: str) -> List[str]:
+    """'스타벅스랑 메가커피 중에', '담배랑 술 중에', '편의점이랑 카페 각각' → 비교 대상 2개 (기간·결제수단 비교는 제외)"""
+    m = _COMPARE_TERMS.search(text)
+    if not m:
+        return []
+    terms = []
+    for raw in (m.group(1), m.group(2)):
+        tok = _JOSA.sub("", raw)
+        if is_noise_term(tok, raw) or _period_from_text(tok).kind != PeriodKind.NONE or to_provider(tok) \
+                or any(re.fullmatch(p, tok) for p, _ in _METHOD_WORDS):
+            return []
+        terms.append(tok)
+    return terms if len(set(terms)) == 2 else []
 
 
 _NOISE_PREFIX = re.compile(
@@ -201,6 +297,9 @@ def is_noise_term(tok: str, raw: Optional[str] = None) -> bool:
     if not tok or tok in _STOPWORDS or (raw and raw in _STOPWORDS) or tok.isdigit():
         return True
     if len(tok) < 2 and not (to_category(tok) or to_item_category(tok)):  # 술·약·밥·책 은 허용
+        return True
+    # 시간대·요일이 뜻의 전부인 단어는 필터로 처리 ('야식' → 21~2시, '점심값' → 11~14시)
+    if re.fullmatch(r"(새벽|아침|오전|점심|오후|저녁|밤|야간|심야|야식|주말|평일)(값|비|에|때|시간)?", tok):
         return True
     if re.fullmatch(r"\d+(원|일|월|년|주|번|건|시)?", tok):
         return True
@@ -249,22 +348,38 @@ def _time_filters(text: str) -> dict:
     return out
 
 
-def rule_plan(message: str) -> QueryPlan:
-    text = message.strip()
-    period = _period_from_text(text)
-    categories, items, merchants, keywords = [], [], [], []
-    for tok in _terms_from_text(text):
-        if tok in BRAND_ALIASES:            # 스벅 → 스타벅스
-            merchants.append(BRAND_ALIASES[tok])
+def classify_terms(tokens: List[str]) -> dict:
+    """검색어 → OpenSearch 필드별 칸 (가맹점·업종·품목·기타). 규칙 해석과 비교 대상 분류가 같이 쓴다"""
+    out: dict = {"categories": [], "itemTerms": [], "merchantTerms": [], "keywords": []}
+    for tok in tokens:
+        if tok in MERCHANT_TYPES:           # 고깃집 → 가맹점명에 돼지·한우·갈비 …
+            out["merchantTerms"] += [w for w in MERCHANT_TYPES[tok] if w not in out["merchantTerms"]]
+            continue
+        brand = brand_alias(tok)
+        if brand:                           # 스벅 → 스타벅스, starbucks → 스타벅스
+            out["merchantTerms"].append(brand)
             continue
         tok = strip_suffix(tok)             # 담배값 → 담배, 김밥집 → 김밥, 영화비 → 영화
         cat, icat = to_category(tok), to_item_category(tok)
-        if cat and cat not in categories:
-            categories.append(cat)          # 업종 (편의점, 카페 …)
-        if (icat or is_item_word(tok)) and tok not in items:
-            items.append(tok)               # 품목 분류·상품명 (담배, 삼겹살 …) → 품목 단위 집계
+        if cat and cat not in out["categories"]:
+            out["categories"].append(cat)   # 업종 (편의점, 카페 …)
+        if (icat or is_item_word(tok)) and tok not in out["itemTerms"]:
+            out["itemTerms"].append(tok)    # 품목 분류·상품명 (담배, 삼겹살 …) → 품목 단위 집계
         if not cat and not icat and not is_item_word(tok):
-            keywords.append(tok)
+            out["keywords"].append(tok)
+    return out
+
+
+def rule_plan(message: str) -> QueryPlan:
+    text = message.strip()
+    period = _period_from_text(text)
+    compared = compare_periods(text)
+    compare_period = None
+    if compared:
+        period, compare_period = compared
+    fields = classify_terms(_terms_from_text(text))
+    categories, items, merchants, keywords = (fields["categories"], fields["itemTerms"], fields["merchantTerms"],
+                                              fields["keywords"])
 
     provider = to_provider(text)
     card_company = to_card_company(text) if re.search(r"카드", text) else None
@@ -289,6 +404,8 @@ def rule_plan(message: str) -> QueryPlan:
             group_by = GroupBy.DAY   # 하루 평균 = 일별 합계의 평균
     elif _MAX.search(text):
         metric = Metric.MAX
+    elif _MIN.search(text):
+        metric = Metric.MIN
     if _QTY.search(text) or (_FREQ.search(text) and not _SUM_MONEY.search(text)):
         metric = Metric.COUNT
     for pattern, g in ((_GROUP_ITEM, GroupBy.ITEM), (_GROUP_CATEGORY, GroupBy.CATEGORY),
@@ -305,8 +422,8 @@ def rule_plan(message: str) -> QueryPlan:
                      or bool(extra))
     if _SMALLTALK.search(text) and not has_condition:
         intent = Intent.SMALLTALK
-    elif metric == Metric.MAX:
-        intent = Intent.LIST  # '제일 비싼 거' → 금액순 목록
+    elif metric in (Metric.MAX, Metric.MIN):
+        intent = Intent.LIST  # '제일 비싼 거' / '제일 싼 거' → 금액순 목록
     elif is_aggregate and not re.search(r"내역|목록|리스트|보여", text):
         intent = Intent.AGGREGATE
     elif _LIST.search(text) or has_condition:
@@ -319,14 +436,26 @@ def rule_plan(message: str) -> QueryPlan:
     if _RECENT_ONE.search(text) and period.kind != PeriodKind.LAST_N_DAYS:
         intent, metric, group_by = Intent.LIST, Metric.SUM, GroupBy.NONE
     if _TOP_DAY.search(text):
-        intent, metric, group_by = Intent.AGGREGATE, Metric.MAX, GroupBy.DAY
+        intent, group_by = Intent.AGGREGATE, GroupBy.DAY
+        metric = Metric.MIN if re.search(r"적게", text) else Metric.MAX
+    limit = 1 if (metric in (Metric.MAX, Metric.MIN) and intent == Intent.LIST) or (
+        _RECENT_ONE.search(text) and period.kind != PeriodKind.LAST_N_DAYS) else None
+    m = _TOP_N.search(text)
+    if m and group_by != GroupBy.NONE:
+        limit = int(m.group(1) or m.group(2))   # 'top 3', '3군데' → 순위 3개
+    targets = compare_terms(text)
+    if compare_period or targets or _SHARE.search(text) or _UNIT_PRICE.search(text):
+        # 비교·비중·단가는 숫자 질문 (대상별 합계는 서비스가 따로 조회)
+        intent = Intent.AGGREGATE
+        if not re.search(r"별", text):
+            group_by = GroupBy.NONE
+        if metric in (Metric.MAX, Metric.MIN):
+            metric = Metric.SUM
     return QueryPlan.build(
         intent=intent, period=period, categories=categories, itemTerms=items, merchantTerms=merchants,
         keywords=keywords, semanticQuery=" ".join(categories + merchants + items + keywords) or None,
         provider=provider, method=method, cardCompany=card_company, status=status,
-        metric=metric, groupBy=group_by,
-        limit=1 if (metric == Metric.MAX and intent == Intent.LIST) or (
-            _RECENT_ONE.search(text) and period.kind != PeriodKind.LAST_N_DAYS) else None,
+        metric=metric, groupBy=group_by, limit=limit, comparePeriod=compare_period, compareTerms=targets,
         **extra,
     )
 
@@ -360,9 +489,18 @@ period (날짜 계산 금지):
 - 이번 주/지난주 → RELATIVE, unit=WEEK, offset=0/-1
 - 이번 달/지난달 → RELATIVE, unit=MONTH, offset=0/-1
 - 올해/작년 → RELATIVE, unit=YEAR, offset=0/-1
-- 최근 N일/최근 N주 → LAST_N_DAYS, days=N (주는 N*7)
+- 최근 N일/최근 N주 → LAST_N_DAYS, days=N (주는 N*7). '최근 일주일' → 7, '최근 한 달' → 30
 - 'N월' → MONTH_OF_YEAR, month=N, year 는 말했을 때만
 - 날짜를 직접 말함 ('3월 5일', '2025-03-05') → ABSOLUTE, startDate/endDate (YYYY-MM-DD, 연도 없으면 {year})
+- 'A부터 B까지' → ABSOLUTE, startDate=A, endDate=B. '어제 오늘 합쳐서' → LAST_N_DAYS, days=2
+
+비교 (두 기간·여러 대상의 숫자를 견주는 질문. 각각 따로 집계됩니다):
+- comparePeriod: 두 기간 비교일 때 period=더 최근 기간, comparePeriod=다른 기간. 아니면 null
+  ("지난달이랑 이번달 중에 언제 더 썼어" → period=이번 달, comparePeriod=지난달.
+   "지난주 대비 얼마나 늘었어" → period=이번 주, comparePeriod=지난주)
+- compareTerms: 대상 비교일 때 각 대상 이름 그대로 ("스타벅스랑 메가커피 중에" → ["스타벅스","메가커피"],
+  "담배랑 술 중 뭐에 더" → ["담배","술"], "편의점이랑 카페 각각" → ["편의점","카페"]). 아니면 []
+  비교 질문은 intent=AGGREGATE, groupBy=NONE 입니다.
 
 검색어 (질문에 나온 것만, 서로 다른 칸은 AND 로 검색됩니다):
 - categories : 업종을 말하면 위 업종 값으로 ("편의점에서" → ["편의점"], "커피숍" → ["카페"], "밥 먹은 곳" → ["음식점"])
@@ -383,8 +521,10 @@ period (날짜 계산 금지):
 - status: 취소/환불을 묻는 경우만 CANCELED/REFUNDED, 아니면 null
 - minAmount/maxAmount: "만원 이상" → minAmount=10000, "5천원 이하" → maxAmount=5000
 - weekdays: 주말 → [6,7], 평일 → [1,2,3,4,5], 금요일 → [5]. 말하지 않으면 []
-- hourFrom/hourTo: 새벽 0~5, 아침 6~11, 점심 11~14, 저녁 17~21, 밤 21~2. 말하지 않으면 null
-- metric: SUM(기본, 금액)/COUNT(몇 번·몇 개·몇 갑, '제일 많이 간/산/먹은/핀' 처럼 횟수·수량)/AVG(평균)/MAX(제일 비싼 거래)
+- hourFrom/hourTo: 새벽 0~5, 아침 6~11, 점심 11~14, 저녁 17~21, 밤·야식 21~2. 말하지 않으면 null
+  ('야식', '점심값' 처럼 시간대가 뜻의 전부인 단어는 시간 필터만 쓰고 검색어에 넣지 않습니다)
+- metric: SUM(기본, 금액)/COUNT(몇 번·몇 개·몇 갑, '제일 많이 간/산/먹은/핀' 처럼 횟수·수량)/AVG(평균)/
+  MAX(제일 비싼 거래, 한 번에 제일 많이 쓴 거)/MIN(제일 싼 거래, 제일 적게 쓴 날)
 - groupBy: MERCHANT(어디에/어디를 많이)/CATEGORY(업종별)/ITEM(뭘 제일 많이 샀는지·먹었는지·폈는지, 품목별)/
   DAY(일별)/MONTH(월별)/WEEKDAY(요일별)/METHOD(결제수단별)/PROVIDER/NONE
   예) "식당 어디를 제일 많이 갔지" → categories=["음식점"], groupBy=MERCHANT, metric=COUNT
@@ -395,10 +535,20 @@ period (날짜 계산 금지):
       "스벅 마지막으로 간 게 언제" → merchantTerms=["스타벅스"], intent=LIST, metric=SUM, limit=1 (최신순.
       MAX 는 '제일 비싼' 일 때만)
       "제일 비싼 거" → intent=LIST, metric=MAX, limit=1, groupBy=NONE
+      "제일 싼 거" → intent=LIST, metric=MIN, limit=1 / "이번 달 제일 적게 쓴 날" → AGGREGATE, metric=MIN, groupBy=DAY
+      "가장 많이 쓴 가게 top 3" → AGGREGATE, groupBy=MERCHANT, limit=3
+      "소비 패턴 분석해줘" / "어디에 돈을 많이 써" → AGGREGATE, groupBy=CATEGORY, 검색어 없음
+      "에쎄 한 갑에 얼마" → AGGREGATE, itemTerms=["에쎄"] (품목 금액÷수량으로 단가 계산됨)
+      "이번 달 지출 중 담배 비중" → AGGREGATE, itemTerms=["담배",…] (전체 대비 비율은 코드가 계산)
+      "건강 관련 지출" → categories=["약국","병원"], itemTerms=["의약품"]
+      "기름값" / "주유" → categories=["주유소"]
 - status 는 취소/환불을 물을 때만. 그 외에는 반드시 null (APPROVED 를 넣지 마십시오)
-- limit: '제일 비싼 거 하나' 처럼 개수를 말한 경우만, 아니면 null
+- limit: '제일 비싼 거 하나', 'top 3' 처럼 개수를 말한 경우만, 아니면 null
 
-후속 질문("그럼 지난달은?", "거기서 카카오페이만", "그 중에 뭐 샀어?")은 이전 대화의 조건을 이어받아 바뀐 부분만 반영합니다.
+후속 질문("그럼 지난달은?", "거기서 카카오페이만", "그 중에 뭐 샀어?", "평균은?", "그럼 메가커피는?")은
+이전 대화의 조건(가맹점·품목·기간·필터)을 이어받아 바뀐 부분만 반영합니다.
+예) 이전 "김밥천국 몇 번 갔어?" → 이번 "평균 얼마 썼어?" = merchantTerms=["김밥천국"], metric=AVG
+    이전 "이번 달 편의점에서 얼마 썼어?" → 이번 "지난달은?" = categories=["편의점"], period=지난달
 """
 
 _WEEKDAY_NAMES = "월화수목금토일"
@@ -488,6 +638,27 @@ def sanitize_llm_plan(plan: QueryPlan, message: str, history: List[ChatTurn]) ->
         updates["period"] = Period.none()
 
     rule = rule_plan(message)
+    # 규칙이 확실히 잡는 기간 표현 ('최근 일주일', '어제 오늘 합쳐서', '2일부터 8일까지') 은 규칙값 우선
+    # (실측: '최근 일주일' → 검색어 '일주일' + 전체 기간, '어제 오늘 합쳐서' → 오늘만)
+    said = _period_from_text(message)
+    if said.kind in (PeriodKind.LAST_N_DAYS, PeriodKind.ABSOLUTE) and plan.period != said and not rule.comparePeriod:
+        logger.info(f"기간 표현을 규칙값으로 보정 {plan.period.kind.value} → {said.kind.value}")
+        updates["period"] = said
+    # 비교 질문: 두 기간 / 여러 대상
+    if rule.comparePeriod:
+        updates.update(period=rule.period, comparePeriod=rule.comparePeriod)
+    elif plan.comparePeriod and not _COMPARE_WORDS.search(message):
+        updates["comparePeriod"] = None
+    targets = [t for t in plan.compareTerms if not is_noise_term(t) and _period_from_text(t).kind == PeriodKind.NONE]
+    if len(set(targets)) < 2:
+        targets = rule.compareTerms
+    updates["compareTerms"] = _clean(targets) if (_COMPARE_WORDS.search(message) or rule.compareTerms) else []
+    if updates.get("comparePeriod", plan.comparePeriod) or updates["compareTerms"]:
+        updates["intent"] = Intent.AGGREGATE
+        if plan.groupBy != GroupBy.NONE and "별" not in message:
+            updates["groupBy"] = GroupBy.NONE
+        if plan.metric in (Metric.MAX, Metric.MIN):
+            updates["metric"] = Metric.SUM
     for field in ("provider", "method", "cardCompany", "status", "minAmount", "maxAmount", "hourFrom", "hourTo"):
         if getattr(plan, field) is None and getattr(rule, field) is not None:
             logger.info(f"LLM 플랜에 '{field}' 누락 → 규칙값 보충")
@@ -495,8 +666,17 @@ def sanitize_llm_plan(plan: QueryPlan, message: str, history: List[ChatTurn]) ->
     if not plan.weekdays and rule.weekdays:
         updates["weekdays"] = rule.weekdays
     # 질문에 분명한 표현이 있는데 LLM 이 놓친 집계 방식 보충 ('몇 갑', '제일 많이 간', '뭐 제일 많이')
-    if plan.groupBy == GroupBy.NONE and rule.groupBy != GroupBy.NONE:
+    if plan.groupBy == GroupBy.NONE and rule.groupBy != GroupBy.NONE and "groupBy" not in updates:
         updates["groupBy"] = rule.groupBy
+    # '제일 싼 거', '제일 적게 쓴 날' (실측: '적게' 를 검색어로 넣고 금액 큰 순으로 답함)
+    if rule.metric == Metric.MIN and plan.metric != Metric.MIN:
+        logger.info("'제일 싼/적게' 표현 → metric MIN")
+        updates.update(metric=Metric.MIN, intent=rule.intent, groupBy=rule.groupBy, limit=rule.limit)
+    elif plan.metric == Metric.MIN and not (_MIN.search(message) or _TOP_DAY.search(message)):
+        updates["metric"] = Metric.SUM
+    # 'top 3', '3군데' → 순위 개수
+    if rule.limit and plan.limit is None and rule.groupBy != GroupBy.NONE:
+        updates["limit"] = rule.limit
     # 품목별 순위는 '뭘 제일 많이' 같은 표현이 있을 때만 (실측: '제일 비싼 거' 를 품목 순위로 해석)
     if plan.groupBy == GroupBy.ITEM and rule.groupBy != GroupBy.ITEM:
         logger.info("질문에 품목 순위 표현 없음 → groupBy ITEM 제거")
@@ -571,11 +751,33 @@ def sanitize_llm_plan(plan: QueryPlan, message: str, history: List[ChatTurn]) ->
         if v is not None and not 0 <= v <= 23:
             updates[field] = None
 
+    # '하루 평균' 이 아닌 '평균' 은 건당 평균 (실측: '평균 얼마씩' 을 일별 합계 평균으로)
+    if plan.metric == Metric.AVG and updates.get("groupBy", plan.groupBy) == GroupBy.DAY \
+            and not re.search(r"하루|일\s*평균|매일|날마다|일당", message):
+        updates["groupBy"] = GroupBy.NONE
+    # 가게 종류 ('고깃집') → 업종 전체가 아니라 가맹점명 단어로 (실측: 고깃집 → 음식점 전체 합계)
+    kinds = [k for k in MERCHANT_TYPES if k in message.replace(" ", "")]
+    if kinds:
+        words = [w for k in kinds for w in MERCHANT_TYPES[k]]
+        logger.info(f"가게 종류 {kinds} → 가맹점명 단어 {words}")
+        updates.update(merchantTerms=_clean(words, 16), categories=[], itemTerms=[], keywords=[])
     merged = plan.model_copy(update=updates)
     if not merged.search_terms() and rule.search_terms() and merged.intent != Intent.SMALLTALK and not history:
         logger.info(f"LLM 플랜에 검색어 없음 → 규칙 검색어 보충 {rule.search_terms()}")
         merged = merged.model_copy(update={"categories": rule.categories, "keywords": rule.keywords,
                                            "semanticQuery": merged.semanticQuery or rule.semanticQuery})
+    # 짧은 후속 질문 ('평균 얼마 썼어?', '합계는?') 에 대상이 없으면 직전 질문의 대상·기간을 이어받음
+    # (실측: '김밥천국 몇 번 갔어?' → '평균 얼마 썼어?' 를 전체 거래 평균으로 답함)
+    if prev_user and not merged.search_terms() and not rule.search_terms() and not merged.compareTerms \
+            and len(re.sub(r"\s", "", message)) <= 12 and merged.intent != Intent.SMALLTALK:
+        base = rule_plan(prev_user)
+        if base.search_terms():
+            logger.info(f"짧은 후속 질문 → 직전 질문의 대상 이어받음 {base.search_terms()}")
+            inherit = {k: getattr(base, k) for k in ("categories", "itemTerms", "merchantTerms", "locationTerms",
+                                                     "keywords", "semanticQuery")}
+            if _period_from_text(message).kind == PeriodKind.NONE and merged.period.kind == PeriodKind.NONE:
+                inherit["period"] = base.period
+            merged = merged.model_copy(update=inherit)
     return merged
 
 
@@ -589,7 +791,8 @@ def rule_plan_followup(message: str, history: List[ChatTurn]) -> QueryPlan:
     """
     plan = rule_plan(message)
     prev = next((h.content for h in reversed(history) if h.role == "user"), None)
-    if not prev or not _FOLLOWUP.search(message):
+    short = len(re.sub(r"\s", "", message)) <= 12 and not plan.search_terms() and plan.intent != Intent.SMALLTALK
+    if not prev or not (_FOLLOWUP.search(message) or short):
         return plan
     base = rule_plan(prev)
     updates: dict = {}

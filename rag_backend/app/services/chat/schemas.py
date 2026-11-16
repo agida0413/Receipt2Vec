@@ -78,6 +78,7 @@ class Metric(str, Enum):
     COUNT = "COUNT"
     AVG = "AVG"
     MAX = "MAX"
+    MIN = "MIN"    # 제일 싼 거래 / 제일 적게 쓴 날
 
 
 class GroupBy(str, Enum):
@@ -129,6 +130,8 @@ class QueryPlan(BaseModel):
     metric: Metric
     groupBy: GroupBy
     limit: Optional[int]
+    comparePeriod: Optional[Period] = Field(..., description="두 기간 비교일 때 period 와 비교할 다른 기간 (아니면 null)")
+    compareTerms: List[str] = Field(..., description="여러 대상 비교일 때 각 대상 ('스타벅스랑 메가커피' → [스타벅스, 메가커피]). 아니면 []")
 
     @classmethod
     def build(cls, **kw: Any) -> "QueryPlan":
@@ -136,7 +139,7 @@ class QueryPlan(BaseModel):
             intent=Intent.LIST, period=Period.none(), merchantTerms=[], itemTerms=[], locationTerms=[],
             categories=[], keywords=[], semanticQuery=None, provider=None, method=None, cardCompany=None,
             status=None, minAmount=None, maxAmount=None, weekdays=[], hourFrom=None, hourTo=None,
-            metric=Metric.SUM, groupBy=GroupBy.NONE, limit=None,
+            metric=Metric.SUM, groupBy=GroupBy.NONE, limit=None, comparePeriod=None, compareTerms=[],
         )
         base.update(kw)
         return cls(**base)
@@ -169,3 +172,5 @@ class QueryResult(TransactionQueryResult):
     """챗봇 응답용 조회 결과 (= 저장소 결과 + 의도·기간 라벨)"""
     intent: Intent
     periodLabel: str
+    comparisons: List[Dict[str, Any]] = Field([], description="비교 질문: 대상/기간별 {label, sum, count, quantity}")
+    share: Optional[Dict[str, Any]] = Field(None, description="비중 질문: {part, base, percent, baseLabel}")

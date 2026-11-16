@@ -33,11 +33,13 @@ class GroupBy(str, Enum):
 class GroupOrder(str, Enum):
     SUM = "SUM"        # 금액 순 (어디에 제일 많이 썼지)
     COUNT = "COUNT"    # 횟수/수량 순 (어디를 제일 많이 갔지, 뭘 제일 많이 샀지)
+    SUM_ASC = "SUM_ASC"  # 금액 작은 순 (제일 적게 쓴 날)
 
 
 class SortBy(str, Enum):
     DATE = "DATE"      # 최신순
     AMOUNT = "AMOUNT"  # 금액 큰 순
+    AMOUNT_ASC = "AMOUNT_ASC"  # 금액 작은 순 (제일 싼 거)
 
 
 class MatchType(str, Enum):

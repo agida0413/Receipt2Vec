@@ -36,7 +36,7 @@ from app.services.transactions.schemas import (
 logger = logging.getLogger(__name__)
 
 APPROVED = "APPROVED"
-INDEX_VERSION = 3  # v3: items[].category (품목 분류) 추가
+INDEX_VERSION = 4  # v3: items[].category (품목 분류) 추가 / v4: 뷰티 업종·화장품 분류, 임베딩에 품목 분류·시간대
 DERIVED_FIELDS = ("dedupKey", "searchText", "createdAt", "embedding", "dayOfWeek", "transactedHour")
 DERIVED_MERCHANT_FIELDS = ("category", "brand", "normalizedName")
 
@@ -195,7 +195,7 @@ def build_filters(q: TransactionQuery) -> List[dict]:
         f.append({"terms": {"status": sorted(set(q.statuses))}})
     elif q.status:
         f.append({"term": {"status": q.status}})
-    elif q.mode == QueryMode.AGGREGATE or q.sortBy == SortBy.AMOUNT:
+    elif q.mode == QueryMode.AGGREGATE or q.sortBy in (SortBy.AMOUNT, SortBy.AMOUNT_ASC):
         # 합계/건수와 '제일 비싼 거' 는 정상 승인 건만 (취소·환불 제외)
         f.append({"term": {"status": APPROVED}})
     if q.minAmount is not None or q.maxAmount is not None:
@@ -319,14 +319,17 @@ def _shape(body: Dict[str, Any], q: TransactionQuery, scored: bool) -> Dict[str,
             "avg": {"avg": {"field": "amount.total"}},
             "max": {"max": {"field": "amount.total"}},
         }
-        group = group_agg(q.groupBy, q.groupOrder, by_amount=q.sortBy == SortBy.AMOUNT)
+        asc = q.sortBy == SortBy.AMOUNT_ASC or q.groupOrder == GroupOrder.SUM_ASC
+        group = group_agg(q.groupBy, q.groupOrder, by_amount=q.sortBy in (SortBy.AMOUNT, SortBy.AMOUNT_ASC), ascending=asc)
         if group:
             body["aggs"]["groups"] = group
     if q.itemTerms or q.groupBy == GroupBy.ITEM:
         body.setdefault("aggs", {})["items"] = item_aggs(q)
     if q.mode != QueryMode.AGGREGATE:
         body["size"] = q.limit
-        if q.sortBy == SortBy.AMOUNT:
+        if q.sortBy == SortBy.AMOUNT_ASC:
+            body["sort"] = _AMOUNT_ASC_SORT
+        elif q.sortBy == SortBy.AMOUNT:
             body["sort"] = _AMOUNT_SORT
         elif q.mode == QueryMode.SEARCH and scored:
             body["sort"] = ["_score"] + _DATE_SORT
@@ -338,6 +341,7 @@ def _shape(body: Dict[str, Any], q: TransactionQuery, scored: bool) -> Dict[str,
 _DATE_SORT = [{"transactedDate": {"order": "desc", "missing": "_last"}},
               {"transactedAt": {"order": "desc", "missing": "_last"}}]
 _AMOUNT_SORT = [{"amount.total": {"order": "desc", "missing": "_last"}}]
+_AMOUNT_ASC_SORT = [{"amount.total": {"order": "asc", "missing": "_last"}}]
 
 
 def build_search_body(q: TransactionQuery, relaxed: bool = False,
@@ -415,10 +419,12 @@ def item_aggs(q: TransactionQuery) -> dict:
     }}}
 
 
-def group_agg(group_by: GroupBy, group_order: "GroupOrder" = None, by_amount: bool = False) -> Optional[dict]:
+def group_agg(group_by: GroupBy, group_order: "GroupOrder" = None, by_amount: bool = False,
+              ascending: bool = False) -> Optional[dict]:
     sum_agg = {"sum": {"sum": {"field": "amount.total"}}}
     # '어디를 제일 많이 갔지' 는 횟수, '어디에 제일 많이 썼지' 는 금액
-    order = [{"_count": "desc"}, {"sum": "desc"}] if group_order == GroupOrder.COUNT else {"sum": "desc"}
+    order = ([{"_count": "desc"}, {"sum": "desc"}] if group_order == GroupOrder.COUNT
+             else {"sum": "asc" if ascending else "desc"})
     terms_field = {
         GroupBy.MERCHANT: "merchant.normalizedName", GroupBy.CATEGORY: "merchant.category",
         GroupBy.METHOD: "payment.method", GroupBy.PROVIDER: "payment.provider", GroupBy.WEEKDAY: "dayOfWeek",
@@ -434,7 +440,7 @@ def group_agg(group_by: GroupBy, group_order: "GroupOrder" = None, by_amount: bo
         fmt = "yyyy-MM-dd" if group_by == GroupBy.DAY else "yyyy-MM"
         hist = {"field": "transactedDate", "calendar_interval": interval, "format": fmt, "min_doc_count": 1}
         if by_amount:  # '제일 많이 쓴 날' → 금액 순, 아니면 날짜 순
-            hist["order"] = {"sum": "desc"}
+            hist["order"] = {"sum": "asc" if ascending else "desc"}
         return {"date_histogram": hist, "aggs": sum_agg}
     return None
 
@@ -741,7 +747,11 @@ class TransactionStore:
                 if relaxed.total:
                     relaxed.matchType = MatchType.RELAXED
                     result = relaxed
-            if result.total == 0:
+            # 업종만으로 찾았는데 0건이면 (품목은 사전에 없는 상품이 있어 의미 검색 유지) '없다' 가 정답 (정해진 분류라 의미 검색이 엉뚱한 걸 끌어옴.
+            # 실측: '이번 주 편의점 몇 번' 0건 → 의미 검색이 메가커피를 편의점 방문으로 채택)
+            taxonomy_only = not (q.keywords or q.merchantTerms or q.locationTerms) and \
+                not q.itemTerms and all(to_category(c) for c in q.categories)
+            if result.total == 0 and not taxonomy_only:
                 ids = self._semantic_ids(q)
                 stages.append(f"semantic={len(ids)}")
                 if ids:

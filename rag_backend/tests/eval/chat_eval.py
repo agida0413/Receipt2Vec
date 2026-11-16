@@ -61,6 +61,11 @@ R = [
      "CARD", None, "KB", "APPROVED", None),
     (34, "14:00", "무신사", [], "CARD", None, "KB", "CANCELED", 59000),
     (40, "13:00", "스타벅스 강남R점", [("카페라떼", 1, 5000, "커피")], "CARD", None, "KB", "APPROVED", None),
+    # 4차 추가: 주유·뷰티·배달앱 (새 업종/간편결제)
+    (16, "08:30", "GS칼텍스 역삼주유소", [], "CARD", None, "HYUNDAI", "APPROVED", 50000),
+    (11, "13:30", "올리브영 강남점", [("선크림", 1, 18000, "화장품"), ("립밤", 1, 4000, "화장품")],
+     "CARD", None, "KB", "APPROVED", None),
+    (13, "19:10", "배달의민족", [("떡볶이 세트", 1, 19000, "분식")], "PAY_MONEY", "NAVERPAY", None, "APPROVED", None),
 ]
 
 
@@ -148,7 +153,69 @@ def first(merchant_part: str) -> Tx:
 
 
 CONV = ("GS25", "CU", "세븐일레븐")
+FOOD = ("김밥천국", "하남돼지집", "본가", "교촌")
 WEEKEND = lambda t: t.d.isoweekday() >= 6  # noqa: E731
+
+
+def _top3() -> List[str]:
+    by = {}
+    for t in txs():
+        k = t.merchant.split()[0]
+        by[k] = by.get(k, 0) + t.total
+    return [k for k, _ in sorted(by.items(), key=lambda kv: -kv[1])[:3]]
+
+
+def _pct_tobacco() -> List[str]:
+    p = item_total("담배", THIS_MONTH) / total(THIS_MONTH) * 100
+    return sorted({f"{round(p)}%", f"{p:.1f}%", f"{int(p)}%"})
+
+
+def _top_weekday() -> str:
+    by = {}
+    for t in txs():
+        by[t.d.isoweekday()] = by.get(t.d.isoweekday(), 0) + t.total
+    return "월화수목금토일"[max(by, key=by.get) - 1] + "요일"
+
+
+TOP3, PCT_TOBACCO, TOP_WEEKDAY = _top3(), _pct_tobacco(), _top_weekday()
+
+
+# ---- 요일에 따라 달라지는 기대값 (오늘이 월요일이면 '이번 주' 는 하루뿐) ----
+def money(n: int) -> dict:
+    """금액 기대값. 0원이면 '없다' 는 답도 정답"""
+    return {"all_of": [won(n)]} if n else {"any_of": ["없", "0원"]}
+
+
+def count(n: int) -> dict:
+    return {"all_of": [str(n)]} if n else {"any_of": ["없", "0번", "0회", "0건"]}
+
+
+def _names(rng, tag: str) -> List[str]:
+    names = [n.split()[0] for t in txs(rng) for n, _, _, c in t.items if c == tag]
+    return names or ["없"]
+
+
+def _top_item(rng, tag: str) -> List[str]:
+    by = {}
+    for t in txs(rng):
+        for n, q, _, c in t.items:
+            if c == tag:
+                by[n.split()[0]] = by.get(n.split()[0], 0) + q
+    return [max(by, key=by.get)] if by else ["없"]
+
+
+def _top_merchant(rng) -> str:
+    by = {}
+    for t in txs(rng):
+        by[t.merchant.split()[0]] = by.get(t.merchant.split()[0], 0) + t.total
+    return max(by, key=by.get)
+
+
+LAST_SATURDAY = TODAY - timedelta(days=(TODAY.isoweekday() - 6) % 7)
+
+
+def _merchants_on(d: date) -> List[str]:
+    return [t.merchant.split()[0] for t in txs((d, d + timedelta(days=1)))] or ["없"]
 
 
 # ============================================================================
@@ -174,15 +241,15 @@ CASES: List[Case] = [
     Case("지난달 얼마 썼어?", [won(total(LAST_MONTH))], note="취소 거래 제외"),
     Case("이번 달 평균 얼마씩 썼어?", [won(avg_month)]),
     # 품목
-    Case("저번주에 먹었던 고기 이름이 뭐지?", ["등심"], note="지난주 고기 품목: 한우 등심, 삼겹살(마트)"),
-    Case("이번주에 담배 쓴 돈이 총 얼마야?", [won(item_total("담배", THIS_WEEK))], none_of=[won(total(THIS_WEEK, lambda t: t.merchant.startswith(CONV)))],
+    Case("저번주에 먹었던 고기 이름이 뭐지?", any_of=_names(LAST_WEEK, "고기"), note="지난주 고기 품목 (요일에 따라 달라짐)"),
+    Case("이번주에 담배 쓴 돈이 총 얼마야?", **money(item_total("담배", THIS_WEEK)), none_of=[w for w in [won(total(THIS_WEEK, lambda t: t.merchant.startswith(CONV)))] if w != "0"],
          note="편의점 결제 전체가 아니라 담배 품목만"),
-    Case("이번주 담배 뭐 많이 폈지?", ["에쎄"]),
+    Case("이번주 담배 뭐 많이 폈지?", any_of=_top_item(THIS_WEEK, "담배")),
     Case("이번달 가장 많이 사먹은게 뭐야?", ["에쎄"], note="수량 기준 1위"),
     Case("이번 달 담배값 얼마 나왔어?", [won(item_total("담배", THIS_MONTH))]),
     Case("담배 몇 갑 샀어?", [f"{item_qty('담배')}"]),
     Case("술 마신 적 있어?", any_of=["소주", "카스"]),
-    Case("이번 주 커피에 쓴 돈 얼마야?", [won(item_total("커피", THIS_WEEK))]),
+    Case("이번 주 커피에 쓴 돈 얼마야?", **money(item_total("커피", THIS_WEEK))),
     Case("커피 몇 번 마셨어?", [f"{len(txs(ALL, lambda t: any(c == '커피' for *_, c in t.items)))}"]),
     Case("삼겹살 언제 먹었어?", [md(first("하남돼지집").d)]),
     Case("치킨 시켜먹은 적 있어?", ["교촌"]),
@@ -198,7 +265,7 @@ CASES: List[Case] = [
                                                     f"{len(txs(ALL, lambda t: '김밥천국' in t.merchant))}회"]),
     Case("김밥천국 몇 번 갔어?", [f"{len(txs(ALL, lambda t: '김밥천국' in t.merchant))}"]),
     Case("편의점에서 이번 달 얼마 썼어?", [won(total(THIS_MONTH, lambda t: t.merchant.startswith(CONV)))]),
-    Case("이번 주 편의점 몇 번 갔어?", [f"{len(txs(THIS_WEEK, lambda t: t.merchant.startswith(CONV)))}"]),
+    Case("이번 주 편의점 몇 번 갔어?", **count(len(txs(THIS_WEEK, lambda t: t.merchant.startswith(CONV))))),
     Case("스타벅스에서 얼마 썼어?", [won(total(ALL, lambda t: '스타벅스' in t.merchant))]),
     Case("스벅 마지막으로 간 게 언제야?", [md(first("스타벅스").d)]),
     Case("담배 제일 많이 산 곳 어디야?", ["GS25"]),
@@ -233,8 +300,8 @@ CASES: List[Case] = [
     # ---- 2차: 1차에 맞춰 고치지 않은 새 표현 (일반화 확인용) ----
     Case("요즘 담배 너무 많이 피는 것 같은데 이번 달 담배 몇 갑이야?", [f"{item_qty('담배', THIS_MONTH)}"]),
     Case("고기 먹으러 간 날 언제언제야?", [md(first("하남돼지집").d), md(first("본가").d)]),
-    Case("지난주에 제일 많이 쓴 곳 어디야?", ["본가"]),
-    Case("이번 주 점심값 얼마 썼어?", any_of=[won(total(THIS_WEEK, lambda t: 11 <= t.hour <= 14)),
+    Case("지난주에 제일 많이 쓴 곳 어디야?", [_top_merchant(LAST_WEEK)]),
+    Case("이번 주 점심값 얼마 썼어?", any_of=[won(total(THIS_WEEK, lambda t: 11 <= t.hour <= 14)), *(["없"] if not total(THIS_WEEK, lambda t: 11 <= t.hour <= 14) else []),
                                          won(total(THIS_WEEK, lambda t: 11 <= t.hour <= 14 and '김밥' in t.merchant))],
          note="애매: 카페를 점심값에 넣을지 (둘 다 인정)"),
     Case("카페라떼 몇 잔 마셨어?", [f"{sum(q for t in txs() for n, q, _, _ in t.items if n == '카페라떼')}"]),
@@ -251,8 +318,8 @@ CASES: List[Case] = [
     Case("평일 점심 주로 어디서 먹어?", ["김밥천국"]),
     Case("소주 마신 날이 언제야?", [md(first("하남돼지집").d)]),
     Case("새우깡 얼마였지?", ["1,500"]),
-    Case("이번 주에 술값 얼마 나왔어?", [won(item_total("주류", THIS_WEEK))]),
-    Case("배달 시켜먹은 거 있어?", any_of=["교촌", "없"], note="애매: 배달 여부는 데이터에 없음 (치킨집 또는 없음 인정)"),
+    Case("이번 주에 술값 얼마 나왔어?", **money(item_total("주류", THIS_WEEK))),
+    Case("배달 시켜먹은 거 있어?", any_of=["배달의민족", "교촌"], note="배달앱 거래 (치킨집도 인정)"),
     Case("병원 간 적 있어?", any_of=["없"], none_of=["병원에서"]),
     Case("이번 달 제일 많이 쓴 날은 언제야?",
          [md(max({t.d for t in txs(THIS_MONTH)}, key=lambda d: total((d, d + timedelta(days=1)))))]),
@@ -265,20 +332,20 @@ CASES: List[Case] = [
     Case("2만원 넘게 쓴 식당 어디야?", any_of=["하남돼지집", "본가"]),
     Case("커피 마시러 제일 자주 간 카페는?", ["스타벅스"]),
     Case("편의점 몇 번 갔어?", [f"{len(txs(ALL, lambda t: t.merchant.startswith(CONV)))}"]),
-    Case("토요일에 뭐 했어?", ["교촌"]),
+    Case("토요일에 뭐 했어?", any_of=_merchants_on(LAST_SATURDAY)),
 ] + [
     # ---- 3차: 위 수정 이후 처음 보는 질문 (구어체·오타·복합 조건) ----
-    Case("이번주 편의점에서 담배값만 얼마야", [won(item_total("담배", THIS_WEEK))]),
+    Case("이번주 편의점에서 담배값만 얼마야", **money(item_total("담배", THIS_WEEK))),
     Case("한우 먹은 데가 어디였더라", ["본가"]),
     Case("요번달 스타벅스 몇번 감?", [f"{len(txs(THIS_MONTH, lambda t: '스타벅스' in t.merchant))}"]),
-    Case("지난주 주말에 뭐 했지", any_of=["CGV", "이마트", "교촌"]),
+    Case("지난주 주말에 뭐 했지", any_of=[m for t in txs(LAST_WEEK, WEEKEND) for m in [t.merchant.split()[0]]] or ["없"]),
     Case("카스 몇캔 마심?", [f"{sum(q for t in txs() for n, q, _, _ in t.items if '카스' in n)}"]),
     Case("레종 산 적 있나", ["GS25"]),
     Case("11시 전에 결제한 거", any_of=["메가커피", "GS25"]),
     Case("이번달 카페에 얼마 씀", [won(total(THIS_MONTH, lambda t: any(k in t.merchant for k in ("스타벅스", "메가커피", "이디야"))))]),
     Case("돼지고기 먹은 날", [md(first("하남돼지집").d)]),
     Case("지난달에 약 산 거 얼마였어", ["3,500"]),
-    Case("카카오페이 이번 주 사용액", [won(total(THIS_WEEK, lambda t: t.provider == "KAKAOPAY"))]),
+    Case("카카오페이 이번 주 사용액", **money(total(THIS_WEEK, lambda t: t.provider == "KAKAOPAY"))),
     Case("만원 이하로 쓴 거 몇 건이야", [f"{len(txs(ALL, lambda t: t.total <= 10000))}"]),
     Case("영화비 얼마 썼어", ["15,000"]),
     Case("치킨 얼마짜리였어?", ["23,000"]),
@@ -291,8 +358,59 @@ CASES: List[Case] = [
     Case("교보문고 간 적 있어?", any_of=["없"], none_of=["교보문고에서 결제"]),
     Case("그 날 또 뭐 샀어?", any_of=["양파", "우유", "영화"],
          history=[("이마트에서 뭐 샀어?", f"{md(first('이마트').d)} 이마트 성수점에서 삼겹살 600g, 양파, 우유 1L 를 샀어요.")]),
-    Case("이번 달 식비 얼마야?", [won(total(THIS_MONTH, lambda t: any(k in t.merchant for k in ("김밥천국", "하남돼지집", "본가", "교촌"))))],
-         note="애매: 식비 = 음식점 업종"),
+    Case("이번 달 식비 얼마야?", any_of=[won(total(THIS_MONTH, lambda t: any(k in t.merchant for k in FOOD))),
+                                     won(total(THIS_MONTH, lambda t: any(k in t.merchant for k in FOOD + ("배달의민족",))))],
+         note="애매: 식비 = 음식점 업종 (배달 포함도 인정)"),
+] + [
+    # ---- 4차: 비교·범위·최저·비중·top N·오타/영문·의미 검색·후속 ----
+    Case("지난달이랑 이번달 중에 언제 더 많이 썼어?", [won(total(LAST_MONTH)), won(total(THIS_MONTH))]),
+    Case("지난주 대비 이번주 지출 얼마나 늘었어?", [won(abs(total(THIS_WEEK) - total(LAST_WEEK)))],
+         note="실제로는 줄었음 → 차액"),
+    Case("스타벅스랑 메가커피 중에 어디에 더 많이 썼어?", ["스타벅스", won(total(ALL, lambda t: '스타벅스' in t.merchant))]),
+    Case("담배랑 술 중에 뭐에 돈 더 많이 썼어?", ["담배", won(item_total("담배"))]),
+    Case("그저께 뭐 샀어?", ["하남돼지집", "스타벅스"]),
+    Case("최근 일주일 동안 얼마 썼어?", [won(total((TODAY - timedelta(days=6), TODAY + timedelta(days=1))))]),
+    Case("3일 전에 어디 갔었지?", ["CU", "김밥천국"]),
+    Case(f"{md(TODAY - timedelta(days=14))}부터 {md(TODAY - timedelta(days=8))}까지 얼마 썼어?",
+         [won(total((TODAY - timedelta(days=14), TODAY - timedelta(days=7))))]),
+    Case("가장 많이 쓴 가게 top 3 알려줘", TOP3),
+    Case("이번 달 제일 적게 쓴 날은?", [md(min({t.d for t in txs(THIS_MONTH)}, key=lambda d: total((d, d + timedelta(days=1)))))]),
+    Case("제일 싼 거 뭐였어?", [min(txs(), key=lambda t: t.total).merchant.split()[0]]),
+    Case("아메리카노 마신 적 있어?", ["스타벅스"]),
+    Case("라떼 어디서 마셨어?", ["메가커피", "이디야"]),
+    Case("고기에 쓴 돈 전부 얼마야?", any_of=[won(item_total("고기")), won(item_total("고기") + 7500)],
+         note="애매: 제육덮밥을 고기로 볼지 (둘 다 인정)"),
+    Case("에쎄 한 갑에 얼마야?", ["4,500"]),
+    Case("담배 마지막으로 산 게 언제야?", [md(TODAY - timedelta(days=1))]),
+    Case("야식 먹은 거 있어?", any_of=["세븐일레븐", "새우깡", "GS25"], note="애매: 밤 9시 이후 먹을거리"),
+    Case("건강 관련해서 쓴 돈 있어?", any_of=["타이레놀", "약국"]),
+    Case("화장품 산 거 있어?", ["올리브영"]),
+    Case("기름값 얼마 나왔어?", ["50,000"]),
+    Case("스타벅스 얼마썻어", [won(total(ALL, lambda t: '스타벅스' in t.merchant))], note="오타"),
+    Case("starbucks 몇 번 갔어?", [f"{len(txs(ALL, lambda t: '스타벅스' in t.merchant))}"], note="영문"),
+    Case("평일 저녁에 쓴 돈 얼마야?", [won(total(ALL, lambda t: t.d.isoweekday() <= 5 and 17 <= t.hour <= 21))]),
+    Case("카카오페이로 만원 넘게 쓴 거", ["쿠팡", "교촌", "카카오T"]),
+    Case("김밥천국에서 카드로 쓴 돈", [won(total(ALL, lambda t: '김밥천국' in t.merchant and t.method == "CARD"))]),
+    Case("네이버페이로 결제한 거 있어?", ["배달의민족"]),
+    Case("지난달은?", [won(total(LAST_MONTH, lambda t: t.merchant.startswith(CONV)))],
+         history=[("이번 달 편의점에서 얼마 썼어?", f"이번 달 편의점에서 {won(total(THIS_MONTH, lambda t: t.merchant.startswith(CONV)))}원 썼어요.")]),
+    Case("그럼 메가커피는?", ["1"], history=[("스타벅스 몇 번 갔어?", "스타벅스에는 2번 가셨어요.")]),
+    Case("그 중에 제일 비싼 건?", [max(txs(LAST_WEEK), key=lambda t: t.total).merchant.split()[0]],
+         history=[("지난주 뭐 먹었어?", "지난주에는 여러 곳에서 식사와 간식을 사셨어요.")]),
+    Case("평균 얼마 썼어?", [won(round(total(ALL, lambda t: '김밥천국' in t.merchant) / len(txs(ALL, lambda t: '김밥천국' in t.merchant))))],
+         history=[("김밥천국 몇 번 갔어?", "김밥천국에 4번 가셨어요.")]),
+    Case("이번 달 지출 중에 담배 비중이 얼마나 돼?", any_of=PCT_TOBACCO),
+    Case("내 소비 패턴 분석해줘", any_of=["음식점", "식비", "식당"]),
+    Case("제일 자주 가는 편의점은?", ["GS25"]),
+    Case("무슨 요일에 돈을 제일 많이 써?", [TOP_WEEKDAY]),
+    Case("어제 오늘 합쳐서 얼마 썼어?", [won(total((TODAY - timedelta(days=1), TODAY + timedelta(days=1))))]),
+    Case("10만원 넘게 쓴 날 있어?", any_of=["없"], none_of=["10만원 넘게 쓴 날은 " + md(TODAY)]),
+    Case("주유는 어디서 했어?", ["GS칼텍스"]),
+    Case("올리브영에서 뭐 샀어", ["선크림"]),
+    Case("이번 달 편의점이랑 카페 각각 얼마 썼어?",
+         [won(total(THIS_MONTH, lambda t: t.merchant.startswith(CONV))),
+          won(total(THIS_MONTH, lambda t: any(k in t.merchant for k in ("스타벅스", "메가커피", "이디야"))))]),
+    Case("한 번에 제일 많이 쓴 게 얼마야?", [won(max(t.total for t in txs()))]),
 ]
 
 
