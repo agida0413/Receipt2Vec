@@ -290,3 +290,97 @@ def test_that_day_refers_to_history_date(monkeypatch):
     llm = QueryPlan.build(intent=Intent.LIST, period=rule_plan("어제").period)
     fixed = sanitize_llm_plan(llm, "그 날 또 뭐 샀어?", hist)
     assert (fixed.period.kind, fixed.period.startDate) == (PeriodKind.ABSOLUTE, "2026-11-08")
+
+
+# ---------------------------------------------------------------------------- 4차: 비교·최저·비중·기간 범위
+def test_compare_periods_and_terms():
+    p = rule_plan("지난달이랑 이번달 중에 언제 더 많이 썼어?")
+    assert p.intent == Intent.AGGREGATE and p.groupBy == GroupBy.NONE
+    assert (p.period.unit, p.period.offset) == (PeriodUnit.MONTH, 0)
+    assert (p.comparePeriod.unit, p.comparePeriod.offset) == (PeriodUnit.MONTH, -1)
+    p = rule_plan("지난주 대비 이번주 지출 얼마나 늘었어?")
+    assert (p.period.offset, p.comparePeriod.offset) == (0, -1)
+    p = rule_plan("지난주보다 많이 썼어?")  # 기준 기간 생략 → 이번 주
+    assert (p.period.unit, p.period.offset, p.comparePeriod.offset) == (PeriodUnit.WEEK, 0, -1)
+    assert rule_plan("담배랑 술 중에 뭐에 돈 더 많이 썼어?").compareTerms == ["담배", "술"]
+    assert rule_plan("스타벅스랑 메가커피 중에 어디에 더 많이 썼어?").compareTerms == ["스타벅스", "메가커피"]
+    assert rule_plan("이번 달 편의점이랑 카페 각각 얼마 썼어?").compareTerms == ["편의점", "카페"]
+    assert rule_plan("지난달이랑 이번달 중에 언제 더 많이 썼어?").compareTerms == []   # 기간 비교는 대상 아님
+    assert rule_plan("이번 달 얼마 썼어?").comparePeriod is None
+
+
+def test_min_span_range_and_union_periods():
+    p = rule_plan("제일 싼 거 뭐였어?")
+    assert (p.intent, p.metric, p.limit) == (Intent.LIST, Metric.MIN, 1)
+    p = rule_plan("이번 달 제일 적게 쓴 날은?")
+    assert (p.intent, p.metric, p.groupBy) == (Intent.AGGREGATE, Metric.MIN, GroupBy.DAY)
+    assert not p.search_terms()
+    p = rule_plan("최근 일주일 동안 얼마 썼어?")
+    assert (p.period.kind, p.period.days) == (PeriodKind.LAST_N_DAYS, 7) and not p.search_terms()
+    p = rule_plan("11월 2일부터 8일까지 얼마 썼어?")
+    assert (p.period.kind, p.period.startDate[5:], p.period.endDate[5:]) == (PeriodKind.ABSOLUTE, "11-02", "11-08")
+    p = rule_plan("어제 오늘 합쳐서 얼마 썼어?")
+    r = P.resolve(p.period)
+    assert p.period.kind == PeriodKind.ABSOLUTE and (r.end - r.start).days == 2 and not p.search_terms()
+    q = plan_to_query("u", rule_plan("제일 싼 거 뭐였어?"), None)
+    assert q.sortBy.value == "AMOUNT_ASC"
+
+
+def test_brand_english_night_snack_share_top_n():
+    assert rule_plan("starbucks 몇 번 갔어?").merchantTerms == ["스타벅스"]
+    p = rule_plan("야식 먹은 거 있어?")
+    assert (p.hourFrom, p.hourTo) == (21, 2) and not p.search_terms()
+    p = rule_plan("이번 달 지출 중에 담배 비중이 얼마나 돼?")
+    assert p.intent == Intent.AGGREGATE and p.itemTerms == ["담배"]
+    p = rule_plan("가장 많이 쓴 가게 top 3 알려줘")
+    assert (p.groupBy, p.limit) == (GroupBy.MERCHANT, 3)
+    assert plan_to_query("u", p, None).limit > 3   # 3 은 순위 개수, 거래 표본 수가 아님
+    p = rule_plan("스타벅스 얼마썻어")
+    assert p.intent == Intent.AGGREGATE and p.search_terms() == ["스타벅스"]   # 오타 '썻어' 는 검색어 아님
+
+
+def test_sanitize_compare_and_short_followup():
+    llm = QueryPlan.build(intent=Intent.AGGREGATE, period=Period.none().model_copy(
+        update={"kind": PeriodKind.RELATIVE, "unit": PeriodUnit.MONTH, "offset": -1}), groupBy=GroupBy.MONTH)
+    s = sanitize_llm_plan(llm, "지난달이랑 이번달 중에 언제 더 많이 썼어?", [])
+    assert s.comparePeriod is not None and s.groupBy == GroupBy.NONE and s.period.offset == 0
+    llm = QueryPlan.build(intent=Intent.AGGREGATE, metric=Metric.AVG)
+    hist = [ChatTurn(role="user", content="김밥천국 몇 번 갔어?"), ChatTurn(role="assistant", content="4번이에요.")]
+    s = sanitize_llm_plan(llm, "평균 얼마 썼어?", hist)
+    assert "김밥천국" in s.search_terms() and s.metric == Metric.AVG
+    llm = QueryPlan.build(intent=Intent.LIST, keywords=["야식"], hourFrom=21, hourTo=2)
+    assert not sanitize_llm_plan(llm, "야식 먹은 거 있어?", []).search_terms()
+    llm = QueryPlan.build(intent=Intent.AGGREGATE, keywords=["일주일"])
+    s = sanitize_llm_plan(llm, "최근 일주일 동안 얼마 썼어?", [])
+    assert s.period.kind == PeriodKind.LAST_N_DAYS and not s.search_terms()
+
+
+def test_compare_and_share_answers():
+    from app.services.chat.answerer import compare_text
+    plan = rule_plan("지난달이랑 이번달 중에 언제 더 많이 썼어?")
+    comps = [{"label": "이번 달", "sum": 300000, "count": 14}, {"label": "지난달", "sum": 100000, "count": 6}]
+    t = compare_text(comps, plan)
+    assert "200,000원 더 많음" in t and "+200.0%" in t
+    res = QueryResult(total=20, transactions=[], intent=Intent.AGGREGATE, periodLabel="이번 달", comparisons=comps)
+    assert "200,000원" in template_answer(plan, res, "지난달이랑 이번달 중에 언제 더 많이 썼어?")
+    assert "200,000원" in _answer_hints("q", plan, res)
+    plan = rule_plan("이번 달 지출 중에 담배 비중이 얼마나 돼?")
+    res = QueryResult(total=4, transactions=[], intent=Intent.AGGREGATE, periodLabel="이번 달",
+                      share={"part": 27000, "base": 297630, "percent": 9.1, "baseLabel": "이번 달 전체 지출"})
+    assert "9.1%" in template_answer(plan, res, "") and "9.1%" in _answer_hints("q", plan, res)
+
+
+def test_merchant_type_and_plain_average():
+    p = rule_plan("고깃집에서 쓴 돈 얼마야?")
+    assert "돼지" in p.merchantTerms and "한우" in p.merchantTerms and not p.categories
+    llm = QueryPlan.build(intent=Intent.AGGREGATE, categories=["음식점"])
+    s = sanitize_llm_plan(llm, "고깃집에서 쓴 돈 얼마야?", [])
+    assert not s.categories and "돼지" in s.merchantTerms
+    llm = QueryPlan.build(intent=Intent.AGGREGATE, metric=Metric.AVG, groupBy=GroupBy.DAY)
+    assert sanitize_llm_plan(llm, "이번 달 평균 얼마씩 썼어?", []).groupBy == GroupBy.NONE
+    assert sanitize_llm_plan(llm, "이번 주 하루에 평균 얼마 썼어?", []).groupBy == GroupBy.DAY
+
+
+def test_merchant_type_words_do_not_expand_to_category():
+    from app.services.transactions.enrich import MERCHANT_TYPES, to_category
+    assert not [w for ws in MERCHANT_TYPES.values() for w in ws if to_category(w)]

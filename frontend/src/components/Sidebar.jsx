@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { STATUS_KO, via, won } from '../format.js'
 import { IconChevron, IconClose, IconLogo, IconPlus, IconRefresh, IconTrash, IconUpload } from './icons.jsx'
 
@@ -17,30 +17,18 @@ function dayLabel(d) {
 }
 
 export default function Sidebar({
-  open, onClose, userId, onChangeUser, onNewChat, onUpload, txs, txLoading, txError, onRefresh, onDelete, summary,
+  open, onClose, user, onLogout, onNewChat, onUpload, txs, txLoading, txError, onRefresh, onDelete, summary,
 }) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(userId)
   const [confirmId, setConfirmId] = useState(null)
-  const inputRef = useRef(null)
-
-  useEffect(() => setDraft(userId), [userId])
-  useEffect(() => {
-    if (editing) inputRef.current?.select()
-  }, [editing])
+  const [confirmLogout, setConfirmLogout] = useState(false)
+  const displayName = user?.name || user?.email || '사용자'
+  const providerKo = { google: 'Google', naver: '네이버', kakao: '카카오' }
 
   const groups = []
   for (const t of txs) {
     const key = t.date || ''
     if (!groups.length || groups[groups.length - 1].key !== key) groups.push({ key, items: [] })
     groups[groups.length - 1].items.push(t)
-  }
-
-  function submitUser(e) {
-    e.preventDefault()
-    const id = draft.trim()
-    if (id) onChangeUser(id)
-    setEditing(false)
   }
 
   const now = new Date()
@@ -131,20 +119,26 @@ export default function Sidebar({
         </div>
 
         <div className="profile">
-          {editing ? (
-            <form onSubmit={submitUser} className="profile-form">
-              <input ref={inputRef} value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={submitUser}
-                aria-label="사용자 ID" placeholder="사용자 ID" />
-            </form>
-          ) : (
-            <button className="profile-btn" onClick={() => setEditing(true)} title="사용자 전환">
-              <span className="profile-avatar">{(userId || '?').slice(0, 1).toUpperCase()}</span>
-              <span className="profile-name">
-                <b>{userId}</b>
-                <span>사용자 전환</span>
+          <div className="profile-user" title={user?.email || ''}>
+            {user?.profileImageUrl ? (
+              <span className="profile-avatar img" style={{ backgroundImage: `url("${user.profileImageUrl}")` }}
+                aria-hidden="true">.</span>
+            ) : (
+              <span className="profile-avatar">{displayName.slice(0, 1).toUpperCase()}</span>
+            )}
+            <span className="profile-name">
+              <b>{displayName}</b>
+              <span>{(user?.providers || []).map((p) => providerKo[p] || p).join(' · ') || user?.email}</span>
+            </span>
+            {confirmLogout ? (
+              <span className="confirm">
+                <button className="mini danger" onClick={onLogout}>로그아웃</button>
+                <button className="mini" onClick={() => setConfirmLogout(false)}>취소</button>
               </span>
-            </button>
-          )}
+            ) : (
+              <button className="btn ghost sm" onClick={() => setConfirmLogout(true)}>로그아웃</button>
+            )}
+          </div>
         </div>
       </aside>
     </>

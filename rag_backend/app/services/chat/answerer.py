@@ -68,6 +68,28 @@ def _row_line(r, asks_items: bool = False) -> str:
             + status + items)
 
 
+def compare_text(comparisons: List[dict], plan: QueryPlan) -> str:
+    """'이번 달 297,630원(14건) / 지난달 112,100원(6건) → 이번 달이 185,530원 더 많음 (+165.5%)'"""
+    count_mode = plan.metric == Metric.COUNT
+    unit = lambda c: (f"{c.get('quantity', c['count'])}개" if plan.itemTerms and 'quantity' in c  # noqa: E731
+                      else f"{c['count']}번") if count_mode else f"{c['sum']:,}원"
+    parts = [f"{c['label']} {unit(c)}" + ("" if count_mode else f"({c['count']}건)") for c in comparisons]
+    key = (lambda c: c.get("quantity", c["count"])) if count_mode else (lambda c: c["sum"])
+    ranked = sorted(comparisons, key=key, reverse=True)
+    a, b = ranked[0], ranked[1]
+    diff = key(a) - key(b)
+    if diff == 0:
+        verdict = "두 값이 같음"
+    else:
+        diff_s = f"{diff}{'개' if plan.itemTerms else '번'}" if count_mode else f"{diff:,}원"
+        verdict = f"{a['label']}이(가) {b['label']}보다 {diff_s} 더 많음"
+        if len(comparisons) == 2 and key(b):
+            first, second = comparisons[0], comparisons[1]   # 첫 번째 = 기준(최근) 기간
+            rate = (key(first) - key(second)) / key(second) * 100
+            verdict += f" ({first['label']} 기준 {rate:+.1f}%)"
+    return " / ".join(parts) + " → " + verdict
+
+
 def template_answer(plan: QueryPlan, result: Optional[QueryResult], message: str = "") -> str:
     """LLM 을 못 쓸 때의 정해진 문장 (숫자는 조회 결과 그대로)"""
     if plan.intent == Intent.SMALLTALK or result is None:
@@ -85,10 +107,26 @@ def template_answer(plan: QueryPlan, result: Optional[QueryResult], message: str
     prefix = {MatchType.RELAXED: "조건에 딱 맞는 거래는 없어서, 일부 조건이 맞는 거래를 보여드려요.\n",
               MatchType.SEMANTIC: "이름이 정확히 일치하는 거래는 없어서, 비슷한 거래를 찾아봤어요.\n"}.get(result.matchType, "")
 
+    if result.comparisons:
+        lines = [f"- {c['label']}: {c['sum']:,}원 ({c['count']}건)" for c in result.comparisons]
+        return prefix + "비교 결과예요.\n" + "\n".join(lines) + "\n" + compare_text(result.comparisons, plan).split(" → ")[1] + "."
+    if result.share:
+        s = result.share
+        return (f"{s['baseLabel']} {s['base']:,}원 중 {subject}지출은 {s['part']:,}원으로 "
+                f"{s['percent']}%를 차지해요.")
+    if plan.intent == Intent.AGGREGATE and result.aggregates.get("unitPrice") and re.search(r"한\s*\S+에|개당|단가", message):
+        a = result.aggregates
+        return (f"{subject}개당 평균 {_won(a['unitPrice'])}이에요 "
+                f"(총 {int(a.get('quantity') or 0)}개, {_won(a.get('sum'))}).")
     if plan.intent == Intent.AGGREGATE:
         a = result.aggregates
         ia = result.itemAggregates
         groups = result.groups
+        if plan.groupBy == GroupBy.DAY and plan.metric == Metric.MIN and groups:
+            top = groups[0]
+            lines = [f"{label} 가장 적게 쓴 날은 {_date_ko(str(top['key']))}이에요 ({_won(top['sum'])}, {top['count']}건)."]
+            lines += [f"- {_date_ko(str(g['key']))}: {_won(g['sum'])} ({g['count']}건)" for g in groups[1:5]]
+            return prefix + "\n".join(lines)
         if plan.groupBy == GroupBy.ITEM and groups:
             lines = [f"{label} {subject}가장 많이 산 품목은 {groups[0]['key']}이에요 ({groups[0]['count']}개)."]
             lines += [f"- {g['key']}: {g['count']}개 ({_won(g['sum'])})" for g in groups[:5]]
@@ -131,7 +169,8 @@ def template_answer(plan: QueryPlan, result: Optional[QueryResult], message: str
 
     shown = result.transactions[:10]
     if plan.limit == 1 and shown:
-        head = f"{label} {subject}가장 비싼 결제예요." if plan.metric == Metric.MAX else f"{subject}가장 최근 거래예요."
+        head = {Metric.MAX: f"{label} {subject}가장 비싼 결제예요.",
+                Metric.MIN: f"{label} {subject}가장 싼 결제예요."}.get(plan.metric, f"{subject}가장 최근 거래예요.")
     elif plan.intent == Intent.SEARCH:
         head = f"{label} {subject}관련 거래 {result.total}건을 찾았어요."
     else:
@@ -146,6 +185,27 @@ _ASKS_ITEMS = re.compile(r"뭐\s*(샀|구매|먹)|뭘\s*샀|무엇을?\s*샀|품
 def _answer_hints(message: str, plan: QueryPlan, result: Optional[QueryResult]) -> str:
     """LLM 이 자주 틀리는 부분을 코드가 판단해 명시 (규칙만으로는 잘 안 지킴)"""
     hints = []
+    if result and result.comparisons:
+        hints.append("비교 결과(코드가 대상·기간별로 따로 집계함, 이 숫자만 쓰십시오): " + compare_text(result.comparisons, plan)
+                     + ". 질문이 '늘었어?' 처럼 방향을 가정해도 실제 증감 방향대로 답하십시오.")
+    if result and result.share:
+        s = result.share
+        hints.append(f"비중(코드 계산): {s['baseLabel']} {s['base']:,}원 중 질문 대상 {s['part']:,}원 = {s['percent']}%. "
+                     "이 퍼센트를 그대로 쓰십시오.")
+    if result and result.aggregates.get("unitPrice"):
+        hints.append(f"개당 평균 가격(품목 금액 ÷ 수량, 코드 계산): {int(result.aggregates['unitPrice']):,}원. "
+                     "'한 갑/한 개에 얼마' 질문에는 이 값을 답하십시오.")
+    if result and plan.metric == Metric.MIN and result.transactions and plan.groupBy == GroupBy.NONE:
+        hints.append("거래는 금액이 작은 순으로 정렬되어 있습니다. 첫 번째가 가장 싼 거래입니다.")
+    if result and plan.metric == Metric.MIN and plan.groupBy == GroupBy.DAY and result.groups:
+        g = result.groups[0]
+        hints.append(f"정답: 가장 적게 쓴 날은 {_date_ko(str(g['key']))} ({int(g['sum'] or 0):,}원, {g['count']}건) 입니다 "
+                     "(지출이 있었던 날 중 합계가 가장 작은 날, 코드 계산). 다른 날을 답하지 마십시오.")
+    if result and plan.metric == Metric.MAX and plan.groupBy == GroupBy.DAY and result.groups:
+        g = result.groups[0]
+        hints.append(f"정답: 가장 많이 쓴 날은 {_date_ko(str(g['key']))} ({int(g['sum'] or 0):,}원, {g['count']}건) 입니다 (코드 계산).")
+    if result and plan.limit and plan.groupBy != GroupBy.NONE and result.groups:
+        hints.append(f"사용자가 상위 {plan.limit}개를 물었습니다. groups 의 앞 {plan.limit}개를 순서대로 모두 말하십시오.")
     if result and result.total and plan.intent != Intent.AGGREGATE:
         hints.append("이번 결과는 목록 조회라 합계가 계산되어 있지 않습니다. 금액을 더해서 '총 …원' 이라고 말하지 마십시오.")
     if result and result.total == 0 and result.userTotal:

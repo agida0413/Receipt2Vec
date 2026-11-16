@@ -3,7 +3,8 @@
 #   docker compose up -d --build                       # OpenSearch + backend + ocr-backend
 #   docker compose up -d --build ocr-backend           # OCR 서버 (backend·opensearch 자동 기동)
 #   (챗봇·거래 저장소는 backend = rag_backend, 3001)
-#   docker compose up -d --build frontend              # 챗봇 화면 http://localhost:3000
+#   docker compose up -d --build frontend gateway      # 화면 + 게이트웨이 http://localhost:3000 (단일 진입점)
+#   docker compose up -d --build auth-server           # 인증 서버 3003 (+ mysql 3307, redis 6379)
 #   docker compose --profile dashboards up -d --build  # + OpenSearch Dashboards(5601)
 #   docker compose --profile logging up -d             # + 모니터링 Grafana(3030): 로그(Loki·Alloy) · 컨테이너 지표(cAdvisor·Prometheus)
 # 설정값은 rag_backend/.env 를 그대로 사용하고, 컨테이너 간 접속 정보만 아래에서 덮어씀
@@ -111,16 +112,130 @@ services:
       start_period: 120s
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # 인증·인가 (독립 서비스): 소셜 로그인(Google·Naver·Kakao) → 자체 JWT 발급
+  #   MySQL : 사용자·소셜 계정·로그인 이력   Redis : refresh token·블랙리스트·OAuth state
+  #   비밀번호는 루트 .env (MYSQL_ROOT_PASSWORD, MYSQL_PASSWORD, REDIS_PASSWORD), OAuth 키는 auth_server/.env
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.4
+    container_name: ragbase-mysql
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?루트 .env 에 MYSQL_ROOT_PASSWORD 를 설정하세요}
+      MYSQL_DATABASE: receipt2vec_auth
+      MYSQL_USER: auth
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?루트 .env 에 MYSQL_PASSWORD 를 설정하세요}
+      TZ: Asia/Seoul
+    ports:
+      - "${MYSQL_PUBLISH_PORT:-3307}:3306"   # 호스트에 MySQL 이 이미 있을 수 있어 3307
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 최초 기동(빈 볼륨) 때 테이블 생성. 인증 서버도 기동 시 같은 파일로 확인 (IF NOT EXISTS)
+      - ./auth_server/app/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: ragbase-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?루트 .env 에 REDIS_PASSWORD 를 설정하세요}
+    # AOF(매초 fsync) + RDB 스냅샷 → 재시작해도 로그인 세션 유지
+    command: ["sh", "-c", "exec redis-server --appendonly yes --appendfsync everysec --save 60 1 --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  auth-server:
+    build:
+      context: ./auth_server
+    image: receipt2vec-auth-server:latest
+    container_name: receipt2vec-auth-server
+    env_file:
+      - ./auth_server/.env   # OAuth client id/secret (auth_server/.env.example 참고)
+    environment:
+      PORT: "3003"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: receipt2vec_auth
+      MYSQL_USER: auth
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # 사용자가 접속하는 주소 (OAuth 콜백 = 이 주소 + /login/oauth2/code/{provider})
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      FRONTEND_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      JWT_KEY_PATH: /data/keys/jwt_private.pem
+      TZ: Asia/Seoul
+    ports:
+      - "${AUTH_PUBLISH_PORT:-3003}:3003"
+    volumes:
+      - auth-keys:/data/keys   # JWT 서명 키 (재시작해도 발급된 토큰 유효)
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3003/')\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  # 화면(정적 파일)만 제공. 외부 포트 없음 → gateway 를 통해서만 접근
   frontend:
     build:
       context: ./frontend
     image: receipt2vec-frontend:latest
     container_name: receipt2vec-frontend
+    expose:
+      - "80"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # API 게이트웨이 (단일 진입점): 경로별 라우팅 + 인스턴스 로드밸런싱
+  #   http://localhost:3000 → /api/ocr → ocr-backend, /api/auth·/oauth2·/login/oauth2 → auth-server,
+  #                            /api → backend(rag), 그 외 → frontend
+  #   배포: GATEWAY_PUBLISH_PORT=80, SERVER_NAME=도메인 (HTTPS 는 docker/gateway/templates 하단 안내)
+  #   인스턴스 늘리기: 해당 서비스의 container_name 을 지우고 docker compose up -d --scale backend=3
+  #     → gateway 가 Docker DNS 로 새 인스턴스를 찾아 자동 분산 (재시작 불필요)
+  # ---------------------------------------------------------------------------
+  gateway:
+    image: nginx:1.28.0-alpine
+    container_name: receipt2vec-gateway
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-localhost}
     ports:
-      - "${FRONTEND_PUBLISH_PORT:-3000}:80"
+      - "${GATEWAY_PUBLISH_PORT:-3000}:80"   # OAuth 콜백(localhost:3000)이 그대로 동작하도록 3000
+    volumes:
+      # *.template 은 시작 시 환경변수 치환 → /etc/nginx/conf.d/
+      - ./docker/gateway/templates:/etc/nginx/templates:ro
     depends_on:
-      - ocr-backend
+      - frontend
       - backend
+      - ocr-backend
+      - auth-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/gateway/health | grep -q ok || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
@@ -237,3 +352,9 @@ volumes:
     name: rag-base_grafana-data
   prometheus-data:      # 컨테이너 지표 (7일 보관)
     name: rag-base_prometheus-data
+  mysql-data:           # 사용자·소셜 계정·로그인 이력 (중요)
+    name: rag-base_mysql-data
+  redis-data:           # 로그인 세션·refresh token (AOF)
+    name: rag-base_redis-data
+  auth-keys:            # JWT 서명 키 (없어지면 발급된 토큰 전부 무효)
+    name: rag-base_auth-keys

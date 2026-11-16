@@ -42,7 +42,7 @@ groups:
           summary: '{{ $labels.service }} 에서 에러 {{ $values.B.Value | printf "%.0f" }}건 (최근 5분)'
           description: '에러 대시보드에서 스택트레이스와 요청 ID(rid)를 확인하세요.'
 
-      # ------------------------------------------------------------------ API 5xx (nginx 기준: 백엔드가 죽어 로그를 못 남긴 경우까지)
+      # ------------------------------------------------------------------ API 5xx (gateway nginx 기준: 백엔드가 죽어 로그를 못 남긴 경우까지)
       - uid: r2v-http-5xx
         title: API 5xx 응답
         condition: C
@@ -57,7 +57,7 @@ groups:
               refId: A
               queryType: instant
               expr: >-
-                sum by (path, status) (count_over_time({project="rag-base", service="frontend"} |= "path=/api/" |~ `status=5\d\d `
+                sum by (path, status) (count_over_time({project="rag-base", service="gateway"} |= "path=/api/" |~ `status=5\d\d `
                 | regexp `path=(?P<path>\S+) status=(?P<status>5\d\d)` [5m]))
           - refId: B
             datasourceUid: __expr__
@@ -69,7 +69,7 @@ groups:
               type: threshold
               expression: B
               conditions: [ { evaluator: { type: gt, params: [0] } } ]
-        labels: { severity: critical, service: frontend }
+        labels: { severity: critical, service: gateway }
         annotations:
           __dashboardUid__: receipt2vec-logs
           __panelId__: '9'

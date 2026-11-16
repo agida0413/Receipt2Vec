@@ -17,9 +17,10 @@
   done   : {"planner": "...", "answerer": "...", "elapsedMs": n}
 """
 import json
+import re
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -28,11 +29,11 @@ from app.core.logging_setup import short
 from app.services.chat import period as period_mod
 from app.services.chat.answerer import LlmAnswerer, stream_template, template_answer
 from app.services.chat.gemini import QuotaExceededError, QuotaGuard, shared_quota_guard
-from app.services.chat.planner import LlmPlanner, make_plan
+from app.services.chat.planner import LlmPlanner, classify_terms, make_plan
 from app.services.chat.schemas import ChatRequest, GroupBy, Intent, Metric, QueryPlan, QueryResult, TransactionStatus
 from app.services.transactions.enrich import CATEGORY_ALIASES, ITEM_CATEGORY_ALIASES
 from app.services.transactions.schemas import (
-    GroupOrder, MatchType, SortBy, TransactionQuery, TransactionQueryResult, UserVocabulary,
+    GroupOrder, MatchType, SortBy, TransactionQuery, TransactionQueryResult, TransactionRow, UserVocabulary,
 )
 from app.services.transactions.store import StoreUnavailableError, TransactionStore, transaction_store
 
@@ -61,9 +62,11 @@ def plan_to_query(user_id: str, plan: QueryPlan, rng: Optional[period_mod.DateRa
         statuses=[s.value for s in _REVERSED] if plan.status in _REVERSED else [],
         minAmount=plan.minAmount, maxAmount=plan.maxAmount,
         weekdays=plan.weekdays, hourFrom=plan.hourFrom, hourTo=plan.hourTo,
-        sortBy=SortBy.AMOUNT if plan.metric == Metric.MAX else SortBy.DATE,
+        sortBy={Metric.MAX: SortBy.AMOUNT, Metric.MIN: SortBy.AMOUNT_ASC}.get(plan.metric, SortBy.DATE),
         groupBy=plan.groupBy.value,
-        groupOrder=GroupOrder.COUNT if plan.metric == Metric.COUNT else GroupOrder.SUM, limit=max(1, min(plan.limit or max_rows, max_rows)),
+        groupOrder={Metric.COUNT: GroupOrder.COUNT, Metric.MIN: GroupOrder.SUM_ASC}.get(plan.metric, GroupOrder.SUM),
+        # 순위 질문의 limit('top 3')은 그룹 개수 → 거래 표본은 기본 개수로
+        limit=max(1, min((plan.limit if plan.groupBy == GroupBy.NONE else None) or max_rows, max_rows)),
     )
 
 
@@ -95,9 +98,24 @@ def item_level(plan: QueryPlan, found: TransactionQueryResult) -> TransactionQue
     if plan.intent != Intent.AGGREGATE or not plan.itemTerms or not ia or plan.groupBy != GroupBy.NONE:
         return found
     agg = dict(found.aggregates)
-    found.aggregates = {"sum": ia.get("sum"), "quantity": ia.get("quantity"), "count": agg.get("count"),
-                        "transactionSum": agg.get("sum")}
+    qty = ia.get("quantity") or 0
+    found.aggregates = {"sum": ia.get("sum"), "quantity": qty, "count": agg.get("count"),
+                        "transactionSum": agg.get("sum"),
+                        # '에쎄 한 갑에 얼마' → 품목 금액 ÷ 수량
+                        "unitPrice": round((ia.get("sum") or 0) / qty) if qty else None}
     return found
+
+
+_SHARE = re.compile(r"비중|비율|퍼센트|몇\s*%|몇\s*프로|차지")
+
+
+def summarize(label: str, plan: QueryPlan, res: TransactionQueryResult) -> Dict[str, Any]:
+    """비교용 요약: 품목 질문이면 품목 금액, 아니면 거래 합계"""
+    a = res.aggregates
+    out = {"label": label, "sum": int(a.get("sum") or 0), "count": int(a.get("count") or 0)}
+    if plan.itemTerms and a.get("quantity") is not None:
+        out["quantity"] = int(a.get("quantity") or 0)
+    return out
 
 
 def daily_average(plan: QueryPlan, found: TransactionQueryResult) -> TransactionQueryResult:
@@ -167,24 +185,26 @@ class ChatService:
                 yield sse("status", {"step": "query", "message": "거래를 조회하는 중…"})
                 try:
                     t0 = time.perf_counter()
-                    found = await run_in_threadpool(self.store.query, plan_to_query(req.userId, plan, rng))
-                    inferred = inferred_only_terms(plan, req.message)
-                    if found.total == 0 and inferred and not req.history:
-                        # 질문에 없는 검색어를 LLM 이 덧붙여 0건 (실측: '어제 뭐 먹었지' → 업종 '음식점' 추가 → 편의점 누락)
-                        logger.info(f"질문에 없는 검색어 {inferred} 로 0건 → 검색어 빼고 재조회")
-                        loose = plan.model_copy(update={k: [] for k in _TERM_FIELDS} | {"semanticQuery": None})
-                        retry = await run_in_threadpool(self.store.query, plan_to_query(req.userId, loose, rng))
-                        if retry.total:
-                            retry.matchType = MatchType.RELAXED
-                            found = retry
-                    found = daily_average(plan, item_level(plan, found))
+                    found = await self._run(req, plan, rng)
+                    comparisons, share, rows = await self._extras(req, plan, rng, found)
+                    if plan.compareTerms and comparisons:
+                        # 원래 조회는 대상들을 AND 로 묶어 0건이 되기 쉬움 → 대상별 결과를 근거로 사용
+                        found = TransactionQueryResult(
+                            total=sum(c["count"] for c in comparisons), matchType=MatchType.EXACT, transactions=rows,
+                            aggregates={"sum": sum(c["sum"] for c in comparisons),
+                                        "count": sum(c["count"] for c in comparisons)})
+                    if plan.limit and plan.groupBy != GroupBy.NONE:
+                        found.groups = found.groups[:plan.limit]   # 'top 3'
                 except StoreUnavailableError as e:
                     logger.error(f"거래 저장소 연결 실패 user={req.userId} error={e}")
                     yield sse("error", {"message": "거래 저장소(OpenSearch)에 연결할 수 없어요. "
                                                    "docker compose 로 opensearch 가 떠 있는지 확인해 주세요."})
                     return
                 result = QueryResult(**found.model_dump(), intent=plan.intent,
-                                     periodLabel=rng.label if rng else "전체 기간")
+                                     periodLabel=rng.label if rng else "전체 기간",
+                                     comparisons=comparisons, share=share)
+                if comparisons or share:
+                    logger.info(f"비교·비중 user={req.userId} comparisons={comparisons} share={share}")
                 logger.info(
                     f"거래 조회 user={req.userId} ms={int((time.perf_counter() - t0) * 1000)} total={result.total} "
                     f"match={result.matchType.value} sum={result.aggregates.get('sum')} "
@@ -212,6 +232,57 @@ class ChatService:
         except Exception as e:  # noqa: BLE001
             logger.exception(f"챗봇 처리 실패 user={req.userId} q={short(req.message)} error={type(e).__name__}: {e}")
             yield sse("error", {"message": f"처리 중 오류가 발생했어요: {type(e).__name__}"})
+
+    async def _run(self, req: ChatRequest, plan: QueryPlan, rng: Optional[period_mod.DateRange],
+                   retry_inferred: bool = True) -> TransactionQueryResult:
+        """조회 1회 (+ LLM 이 덧붙인 검색어로 0건이면 검색어 빼고 재조회) → 품목 금액·하루 평균 보정"""
+        found = await run_in_threadpool(self.store.query, plan_to_query(req.userId, plan, rng))
+        inferred = inferred_only_terms(plan, req.message) if retry_inferred else []
+        if found.total == 0 and inferred and not req.history:
+            # 질문에 없는 검색어를 LLM 이 덧붙여 0건 (실측: '어제 뭐 먹었지' → 업종 '음식점' 추가 → 편의점 누락)
+            logger.info(f"질문에 없는 검색어 {inferred} 로 0건 → 검색어 빼고 재조회")
+            loose = plan.model_copy(update={k: [] for k in _TERM_FIELDS} | {"semanticQuery": None})
+            retry = await run_in_threadpool(self.store.query, plan_to_query(req.userId, loose, rng))
+            if retry.total:
+                retry.matchType = MatchType.RELAXED
+                found = retry
+        return daily_average(plan, item_level(plan, found))
+
+    async def _extras(self, req: ChatRequest, plan: QueryPlan, rng, found
+                      ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[TransactionRow]]:
+        """
+        비교·비중은 LLM 이 숫자를 직접 빼고 나누지 않도록 코드가 대상별로 따로 조회해 계산한다.
+          comparePeriod : 같은 조건을 다른 기간으로 한 번 더 ('지난달이랑 이번달')
+          compareTerms  : 대상마다 검색어를 바꿔 조회 ('스타벅스랑 메가커피', '담배랑 술')
+          비중          : 같은 기간·필터의 전체 합계 대비 ('이번 달 지출 중 담배 비중')
+        """
+        comparisons: List[Dict[str, Any]] = []
+        share = None
+        rows: List[TransactionRow] = []   # 대상 비교의 근거 거래 (대상별 조회 결과 합침)
+        label = rng.label if rng else "전체 기간"
+        agg = plan.model_copy(update={"intent": Intent.AGGREGATE, "groupBy": GroupBy.NONE, "limit": None,
+                                      "metric": plan.metric if plan.metric in (Metric.COUNT, Metric.AVG) else Metric.SUM})
+        if plan.comparePeriod:
+            other_rng = period_mod.resolve(plan.comparePeriod)
+            base = found if plan.intent == Intent.AGGREGATE and plan.groupBy == GroupBy.NONE else await self._run(req, agg, rng)
+            other = await self._run(req, agg.model_copy(update={"period": plan.comparePeriod}), other_rng)
+            comparisons = [summarize(label, agg, base),
+                           summarize(other_rng.label if other_rng else "전체 기간", agg, other)]
+        elif len(plan.compareTerms) >= 2:
+            for term in plan.compareTerms[:4]:
+                fields = classify_terms([term])
+                sub = agg.model_copy(update={**{k: [] for k in _TERM_FIELDS}, **fields, "semanticQuery": term})
+                res = await self._run(req, sub, rng, retry_inferred=False)
+                comparisons.append(summarize(term, sub, res))
+                rows += [r for r in res.transactions[:5] if r.transactionId not in {x.transactionId for x in rows}]
+        if _SHARE.search(req.message) and plan.search_terms() and not comparisons:
+            part = found if plan.intent == Intent.AGGREGATE else await self._run(req, agg, rng)
+            whole = await self._run(req, agg.model_copy(update={**{k: [] for k in _TERM_FIELDS}, "semanticQuery": None}),
+                                    rng, retry_inferred=False)
+            p, w = int(part.aggregates.get("sum") or 0), int(whole.aggregates.get("sum") or 0)
+            if w:
+                share = {"part": p, "base": w, "percent": round(p / w * 100, 1), "baseLabel": f"{label} 전체 지출"}
+        return comparisons, share, rows
 
     async def _answer(self, req: ChatRequest, plan, result, used: Dict[str, str]) -> AsyncIterator[str]:
         """LLM 스트리밍 답변. 못 쓰거나 첫 조각 전에 실패하면 템플릿 답변"""

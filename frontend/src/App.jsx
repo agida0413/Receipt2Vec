@@ -1,26 +1,54 @@
 import { useCallback, useEffect, useState } from 'react'
 import { deleteTransaction, listTransactions, spendingSummary } from './api.js'
+import { loginErrorMessage, logout, onAuthChange, refreshSession } from './auth.js'
 import ChatPanel from './components/ChatPanel.jsx'
 import { IconMenu, IconPlus, IconUpload } from './components/icons.jsx'
+import LoginScreen from './components/LoginScreen.jsx'
 import Sidebar from './components/Sidebar.jsx'
 import { useToast } from './components/Toast.jsx'
 import UploadDialog from './components/UploadDialog.jsx'
 
-const STORAGE_KEY = 'receipt2vec.userId'
-
-function loadUserId() {
-  try {
-    return localStorage.getItem(STORAGE_KEY) || 'user01'
-  } catch {
-    return 'user01'
-  }
-}
-
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
+/** 로그인 확인 → 로그인 화면 또는 서비스 화면 */
 export default function App() {
   const toast = useToast()
-  const [userId, setUserId] = useState(loadUserId)
+  const [user, setUser] = useState(undefined) // undefined = 확인 중, null = 로그인 필요
+  const [loginError, setLoginError] = useState(null)
+
+  useEffect(() => {
+    // 소셜 로그인 콜백 후 돌아온 경우: ?login=success / ?login_error=코드 → 안내 후 주소 정리
+    const params = new URLSearchParams(window.location.search)
+    const err = params.get('login_error')
+    const success = params.get('login') === 'success'
+    if (err || success) {
+      params.delete('login')
+      params.delete('login_error')
+      const rest = params.toString()
+      window.history.replaceState(null, '', window.location.pathname + (rest ? `?${rest}` : ''))
+    }
+    if (err) setLoginError(loginErrorMessage(err))
+    const off = onAuthChange((u) => setUser(u))
+    refreshSession().then((u) => {
+      setUser(u)
+      if (u && success) toast(`${u.name || '사용자'} 님, 환영해요`, 'success')
+    })
+    return off
+  }, [toast])
+
+  async function signOut() {
+    await logout()
+    toast('로그아웃했어요', 'info')
+  }
+
+  if (user === undefined) return <div className="boot-screen">불러오는 중…</div>
+  if (!user) return <LoginScreen error={loginError} />
+  return <Workspace user={user} onLogout={signOut} />
+}
+
+function Workspace({ user, onLogout }) {
+  const toast = useToast()
+  const userId = user.id // 거래·챗봇 데이터는 로그인 계정 ID 로 구분
   const [uploading, setUploading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [chatKey, setChatKey] = useState(0)
@@ -64,18 +92,6 @@ export default function App() {
     refresh()
   }, [refresh])
 
-  function changeUser(id) {
-    if (id === userId) return
-    setUserId(id)
-    setMenuOpen(false)
-    try {
-      localStorage.setItem(STORAGE_KEY, id)
-    } catch {
-      /* 저장 불가 환경 무시 */
-    }
-    toast(`${id} 님으로 전환했어요`, 'info')
-  }
-
   async function remove(id) {
     try {
       await deleteTransaction(userId, id)
@@ -96,8 +112,8 @@ export default function App() {
       <Sidebar
         open={menuOpen}
         onClose={() => setMenuOpen(false)}
-        userId={userId}
-        onChangeUser={changeUser}
+        user={user}
+        onLogout={onLogout}
         onNewChat={newChat}
         onUpload={() => { setUploading(true); setMenuOpen(false) }}
         txs={txs}
