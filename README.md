@@ -2,8 +2,6 @@
 
 > 영수증 사진 한 장으로 지출을 기록하고, 대화로 묻고 답하는 AI 가계부
 
-🔗 **서비스 주소** : [https://kyj.ai.kr](https://kyj.ai.kr)
-
 <br/>
 
 ## 🛠️ Tech Stack
