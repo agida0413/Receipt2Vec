@@ -52,6 +52,8 @@ map $http_upgrade $connection_upgrade {
 
 # 남용 방지: 로그인·토큰 엔드포인트는 IP 당 초당 10회 (순간 20회까지 허용)
 limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/s;
+# Grafana 로그인: IP 당 분당 10회 (비밀번호 대입 방지)
+limit_req_zone $binary_remote_addr zone=grafana_login:1m rate=10r/m;
 limit_req_status 429;
 
 # ------------------------------------------------------------------------------ upstreams

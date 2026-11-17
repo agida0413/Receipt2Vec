@@ -16,15 +16,22 @@ CERT="/etc/letsencrypt/live/${DOMAIN:-_none_}/fullchain.pem"
 
 has_cert() { [ -n "${DOMAIN:-}" ] && [ -s "$CERT" ]; }
 
-# Grafana 접근 허용 IP (GRAFANA_ALLOW="1.2.3.4 5.6.7.0/24") → allow 목록 + deny all. 비어 있으면 모두 차단
+# Grafana 접근 허용 IP
+#   GRAFANA_ALLOW=all                    → IP 제한 없음 (Grafana 로그인으로만 보호)
+#   GRAFANA_ALLOW="1.2.3.4 5.6.7.0/24"  → 목록만 허용, 나머지 403
+#   비어 있음 (로컬 기본)                → 모두 차단 (로컬은 http://localhost:3030 직접 사용)
 {
-  for ip in ${GRAFANA_ALLOW:-}; do
-    case "$ip" in
-      *[!0-9A-Fa-f:./]*) echo "[gateway] GRAFANA_ALLOW 형식 오류 → 무시: $ip" >&2 ;;   # 설정 주입 방지
-      *) echo "allow $ip;" ;;
-    esac
-  done
-  echo "deny all;"
+  case " ${GRAFANA_ALLOW:-} " in
+    *" all "*) echo "allow all;" ;;
+    *)
+      for ip in ${GRAFANA_ALLOW:-}; do
+        case "$ip" in
+          *[!0-9A-Fa-f:./]*) echo "[gateway] GRAFANA_ALLOW 형식 오류 → 무시: $ip" >&2 ;;   # 설정 주입 방지
+          *) echo "allow $ip;" ;;
+        esac
+      done
+      echo "deny all;" ;;
+  esac
 } > "$RUNTIME/grafana-allow.conf"
 echo "[gateway] Grafana 허용 IP: ${GRAFANA_ALLOW:-없음(전부 차단)}"
 
