@@ -55,6 +55,12 @@ services:
       - "80:80"
       - "443:443"
 
+  # 모니터링 (COMPOSE_PROFILES=logging, prod.env): 외부 포트 없이 gateway 의 /grafana/ (허용 IP 만)로만 접근
+  grafana:
+    ports: !reset []
+  alloy:
+    ports: !reset []
+
   # Let's Encrypt 인증서 발급·갱신 (webroot 방식: gateway 가 /.well-known/acme-challenge 를 서비스)
   #   발급 실패(DNS 미설정·80 포트 막힘)면 10분마다 재시도, 발급 후에는 12시간마다 갱신 확인(만료 30일 전 갱신)
   certbot:
