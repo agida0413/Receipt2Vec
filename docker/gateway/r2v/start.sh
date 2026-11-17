@@ -16,6 +16,18 @@ CERT="/etc/letsencrypt/live/${DOMAIN:-_none_}/fullchain.pem"
 
 has_cert() { [ -n "${DOMAIN:-}" ] && [ -s "$CERT" ]; }
 
+# Grafana 접근 허용 IP (GRAFANA_ALLOW="1.2.3.4 5.6.7.0/24") → allow 목록 + deny all. 비어 있으면 모두 차단
+{
+  for ip in ${GRAFANA_ALLOW:-}; do
+    case "$ip" in
+      *[!0-9A-Fa-f:./]*) echo "[gateway] GRAFANA_ALLOW 형식 오류 → 무시: $ip" >&2 ;;   # 설정 주입 방지
+      *) echo "allow $ip;" ;;
+    esac
+  done
+  echo "deny all;"
+} > "$RUNTIME/grafana-allow.conf"
+echo "[gateway] Grafana 허용 IP: ${GRAFANA_ALLOW:-없음(전부 차단)}"
+
 apply() {
   if has_cert; then
     envsubst '${DOMAIN} ${SERVER_NAME}' < /etc/nginx/r2v/https.conf.template > /etc/nginx/conf.d/https.conf

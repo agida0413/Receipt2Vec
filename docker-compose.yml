@@ -225,6 +225,8 @@ services:
     environment:
       SERVER_NAME: ${SERVER_NAME:-localhost}
       DOMAIN: ${DOMAIN:-}
+      # /grafana/ 경로 접근 허용 IP (공백 구분, 비우면 전부 차단 — 로컬은 http://localhost:3030 직접 사용)
+      GRAFANA_ALLOW: ${GRAFANA_ALLOW:-}
     ports:
       - "${GATEWAY_PUBLISH_PORT:-3000}:80"   # OAuth 콜백(localhost:3000)이 그대로 동작하도록 3000
     volumes:
@@ -323,7 +325,10 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       # 알림 메시지의 '대시보드 열기' 링크 주소, 알림 시각 표시용 시간대
+      #   운영: https://kyj.ai.kr/grafana/ (gateway 하위 경로, dev-ops/deploy/prod.env)
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3030}
+      GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SUB_PATH:-false}
+      GF_SECURITY_COOKIE_SECURE: ${GRAFANA_COOKIE_SECURE:-false}
       TZ: Asia/Seoul
       # Slack 알림 웹훅 (루트 .env, git 제외) → provisioning/alerting/slack.yaml 에서 사용
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}

@@ -44,6 +44,12 @@ log_format gateway '$time_iso8601 | $log_level | rid=$req_id | nginx | '
                    'scheme=$scheme route=$route upstream=$upstream_addr upstream_status=$upstream_status '
                    'upstream_ms=$upstream_response_time client=$remote_addr ua="$http_user_agent"';
 
+# WebSocket 연결 업그레이드 (Grafana 실시간 화면)
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ""      "";
+}
+
 # 남용 방지: 로그인·토큰 엔드포인트는 IP 당 초당 10회 (순간 20회까지 허용)
 limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=10r/s;
 limit_req_status 429;
@@ -73,6 +79,13 @@ upstream auth_pool {
     zone auth_pool 64k;
     server auth-server:3003 resolve max_fails=3 fail_timeout=10s;
     keepalive 16;
+}
+
+# 모니터링 (logging 프로필로 띄웠을 때만 존재 — resolve 라 없어도 gateway 는 정상 기동, 요청 시 502)
+upstream grafana_pool {
+    zone grafana_pool 64k;
+    server grafana:3000 resolve max_fails=3 fail_timeout=10s;
+    keepalive 8;
 }
 
 # ------------------------------------------------------------------------------ HTTP (80)
