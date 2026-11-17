@@ -61,15 +61,27 @@ LLM이 숫자를 지어내지 않도록 **질문 해석은 LLM, 금액·건수 �
 
 ## 🎬 시연 영상
 
-### Desktop
+### 🤖 AI 챗봇 질의
+> 순위 집계(top 3) → **이전 대화 맥락 이어받기**("그 중에 제일 비싼 건?") → 요일별 패턴 분석 → **영수증 품목 단위 검색**(아메리카노 → 커피 비중 4.4%) → 근거 거래 펼치기
+
+![AI 챗봇 시연](docs/images/demo-ai-desktop.gif)
+
+| 질문 | AI 가 한 일 |
+|---|---|
+| 가장 많이 쓴 가게 top 3 알려줘 | 질의 의도(순위·가맹점 단위) 파악 → 집계 후 막대 차트 |
+| 그 중에 제일 비싼 건? | 직전 답변의 top 3 가맹점으로 범위를 좁혀 재질의 |
+| 무슨 요일에 돈을 제일 많이 써? | 요일별 그룹 집계, 금액·건수는 코드로 계산 |
+| 이번 달 지출 중에 커피 비중이 얼마나 돼? | "커피" → 아메리카노·라떼로 확장해 영수증 품목 검색, 전체 대비 비중 계산 |
+
+### 🧾 영수증 등록 흐름
 > 추천 질문 → 업종별 지출 → 가맹점 순위 → 근거 거래 펼치기 → 영수증 OCR 인식
 
 ![데스크톱 시연](docs/images/demo-desktop.gif)
 
-### Mobile
-<img src="docs/images/demo-mobile.gif" width="300" alt="모바일 시연" />
+### 📱 Mobile
+<img src="docs/images/demo-ai-mobile.gif" width="300" alt="모바일 AI 챗봇 시연" />&nbsp;&nbsp;<img src="docs/images/demo-mobile.gif" width="300" alt="모바일 영수증 등록 시연" />
 
-🎥 고화질 영상 : [Desktop (mp4)](docs/videos/demo-desktop.mp4) · [Mobile (mp4)](docs/videos/demo-mobile.mp4)
+🎥 고화질 영상 : AI 챗봇 [Desktop](docs/videos/demo-ai-desktop.mp4) · [Mobile](docs/videos/demo-ai-mobile.mp4) / 영수증 등록 [Desktop](docs/videos/demo-desktop.mp4) · [Mobile](docs/videos/demo-mobile.mp4)
 
 <br/>
 
